@@ -88,6 +88,28 @@ _libproc = ctypes.CDLL(ctypes.util.find_library("libproc"), use_errno=True)
 _libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
 _libproc.proc_pid_rusage.restype = ctypes.c_int
 
+# --- responsibility_get_pid_responsible_for_pid() でXPCサービスの「責任元(親)アプリ」を取得する ---
+# com.apple.WebKit.WebContent等のXPCサービスはlaunchd(pid 1)の子として起動されるため、
+# ppidを辿るだけでは起動元アプリ(Safari/Mail/Xcode等)に紐付けられない。
+# このAPIはActivity Monitorが「対象アプリ」列を表示する際に使っているのと同じ仕組み。
+_libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+_libsystem.responsibility_get_pid_responsible_for_pid.argtypes = [ctypes.c_int]
+_libsystem.responsibility_get_pid_responsible_for_pid.restype = ctypes.c_int
+
+def get_responsible_pid(pid):
+    rpid = _libsystem.responsibility_get_pid_responsible_for_pid(pid)
+    return rpid if rpid > 0 else None
+
+# XPCヘルパープロセス(WebKit/Virtualization/写真変換サービス等)は、責任元アプリ
+# (実際にそのヘルパーを起動させたアプリ)が判明する限り、常にそのアプリのグループへ統合する。
+# システムデーモン等、責任元が自分自身または不明なプロセスはそのまま個別ルートとして扱う。
+def remap_responsible_parents(procs):
+    for pid, info in procs.items():
+        rpid = get_responsible_pid(pid)
+        if rpid is None or rpid == pid or rpid not in procs:
+            continue
+        info["ppid"] = rpid
+
 def get_phys_footprint(pid):
     # 戻り値は(footprint_bytes, errno)。他ユーザー所有プロセス等はerrno!=0でfootprint_bytes=Noneになる
     info = _rusage_info_v4()
@@ -210,6 +232,7 @@ def find_root(pid, procs, cache):
 
 def collect_grouped(mem_total):
     procs = snapshot_processes()
+    remap_responsible_parents(procs)
     root_cache = {}
     groups = {}
 
