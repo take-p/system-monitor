@@ -296,7 +296,7 @@ def draw_mirror_chart(x, y, width, unit, top, bottom):
     """上下対称の推移グラフ(Activity Monitorのネットワークのグラフと同じ形)。ネットワーク・ストレージで共用する。
     top/bottom: (ラベル, 現在値, ピーク, 合計の文字列, 履歴, 色, 補足)。topは中央から上向き・見出しは上、
     bottomは中央から下向き・見出しは下に描く。縦軸は上下で別々に伸縮し、小さい方が平らにならないようにする。
-    補足はエラー数などで、目盛りの横に小さく添える。次の描画位置のyを返す"""
+    補足はエラー数などで、目盛りと同じ高さの右端に小さく添える。次の描画位置のyを返す"""
     chart_y = y + SMALL_ROW_HEIGHT
     middle = chart_y + MIRROR_HALF_HEIGHT
     for (label, value, peak, total_text, history, color, note), downward in ((top, False), (bottom, True)):
@@ -318,7 +318,10 @@ def draw_mirror_chart(x, y, width, unit, top, bottom):
         # 目盛り(縦軸の上限)は、グラフの外側の端(上半分は左上、下半分は左下)に小さく添える
         font = mono_small_font()
         label_y = (middle + MIRROR_HALF_HEIGHT - font.ascender() + font.descender() - 1) if downward else chart_y + 1
-        draw_text(f"{scale:g} {unit}{note}", x + 3, label_y, font, tertiary_text())
+        draw_text(f"{scale:g} {unit}", x + 3, label_y, font, tertiary_text())
+        if note:
+            # 補足(エラー数など)は目盛りと同じ高さの右端に寄せる
+            draw_text_right(note, x + width - 3, label_y, font, tertiary_text())
     return y + MIRROR_CHART_HEIGHT
 
 def percent_parts(percent, fmt="{:.1f}%"):
@@ -746,9 +749,8 @@ def network_section(net, dl_history, ul_history, congestion=None,
         signal_rating = ratings.get("SNR") or ratings.get("Signal")
     else:
         spec_row, quality_row, signal_rating = [], [], None
-    # Link + 規格 + 電波
-    # 規格と帯域は1行にまとめる
-    text_rows = 1 + bool(spec_row) + bool(signal_rating)
+    # Link + 接続(有線でも種類とインターフェース名を出す) + 電波
+    text_rows = (2 + bool(signal_rating)) if net else 0
     congestion_block = congestion_height(congestion)
     # バーは回線全体(グラフのUpload+Download)に占める割合。計測のずれでアプリが全体を上回ることがあるので1位も下限にする
     line_total = (net["ul"] + net["dl"]) if net else 0
@@ -777,26 +779,24 @@ def network_section(net, dl_history, ul_history, congestion=None,
         font = body_font()
         secondary = secondary_text()
 
-        # 見出し: 右端に接続方式のアイコンとインターフェース名
-        draw_text("Network", PAD_X, PAD_Y, title_font())
-        iface_text = attributed(f"{net['iface'] or 'N/A'} · {net['kind']}", font)
-        text_x = width - PAD_X - iface_text.size().width
-        iface_text.drawAtPoint_((text_x, PAD_Y))
-        symbol = "wifi" if net["kind"] == "Wi-Fi" else "cable.connector.horizontal"
-        draw_symbol(symbol, text_x - 4, PAD_Y, ROW_HEIGHT, NSColor.labelColor(), align_right=True)
+        # 見出しの右: 今のアップロード/ダウンロードの速度(接続の種類とインターフェース名は「接続」の行に出す)
+        draw_title(width, PAD_Y, "Network", [
+            ("↑ ", secondary), (f"{format_mbps(net['ul'])} Mbps   ", None),
+            ("↓ ", secondary), (f"{format_mbps(net['dl'])} Mbps", None),
+        ])
         y = PAD_Y + TITLE_HEIGHT
 
         # 速度のグラフは一番よく見る情報なので、CPU/GPUと同じく見出しのすぐ下に置く。
         # メニューバーのNET表示(上段↑/下段↓)とそろえて、上り→下りの順に並べる
         totals, peaks = net["totals"], net["peaks"]
-        # エラー/ドロップ数(起動からの合計)は、目盛りの横の空いている所に小さく添える。
+        # エラー/ドロップ数(起動からの合計)は、目盛りと同じ高さの右端に小さく添える。
         # macOSでは送信側のドロップ数を取得できない(psutilが常に0を返す)ので、0ではなく「—」で示す
         y = draw_mirror_chart(
             PAD_X, y, width - PAD_X * 2, "Mbps",
             ("↑ Upload", net["ul"], peaks["ul"], format_bytes(totals["bytes_sent"]), ul_history,
-             NSColor.systemRedColor(), f" · Err {totals['errout']} · Drop —"),
+             NSColor.systemRedColor(), f"Err {totals['errout']} · Drop —"),
             ("↓ Download", net["dl"], peaks["dl"], format_bytes(totals["bytes_recv"]), dl_history,
-             NSColor.systemBlueColor(), f" · Err {totals['errin']} · Drop {totals['dropin']}"),
+             NSColor.systemBlueColor(), f"Err {totals['errin']} · Drop {totals['dropin']}"),
         )
 
         # 接続の詳細(電波・リンク速度・規格・混雑度)は速度の原因を調べるための情報なのでグラフの下に置く
@@ -851,16 +851,11 @@ def network_section(net, dl_history, ul_history, congestion=None,
             draw_text(f"{link:.0f} Mbps" if link else "N/A", PAD_X + label_w, y, font)
         y += ROW_HEIGHT
 
-        # 規格・帯域(1行にまとめる)
-        if spec_row:
-            # ラベル付きで収まればそのまま、収まらなければラベルを省いて「 · 」でつなぐ
-            parts = []
-            for i, (label, value, _rating) in enumerate(spec_row):
-                parts += [(("   " if i else "") + f"{label}: ", secondary), (value, None)]
-            if sum(attributed(text, font).size().width for text, _ in parts) > width - PAD_X * 2:
-                parts = [(" · ".join(value for _, value, _ in spec_row), None)]
-            draw_parts(parts, PAD_X, y, font)
-            y += ROW_HEIGHT
+        # 接続: 「Wi-Fi 5 (802.11ac, 5GHz) / 80MHz (ch 52–64) / en0」。有線は「Ethernet / en7」
+        connection = spec_row[0][1] if spec_row else net["kind"]
+        draw_text("接続", PAD_X, y, font, secondary)
+        draw_text_fit(f"{connection} / {net['iface'] or 'N/A'}", PAD_X + label_w, y, width - PAD_X * 2 - label_w, font)
+        y += ROW_HEIGHT
 
         if congestion:
             draw_congestion(congestion, PAD_X, y, width, label_w, hover)
@@ -952,16 +947,10 @@ def draw_congestion(congestion, x, y, width, label_w, hover=None):
                    x + label_w, note_y, small_font())
         return
 
-    notes = []
-    if congestion["primary"] is not None:
-        # 束ねて使っているチャネルの範囲は「Band:」の行に出しているので、ここは代表番号だけにする
-        current_aps = congestion.get("current_ap_count")
-        notes.append(f"接続中 ch {congestion['primary']}"
-                     + (f"（AP {current_aps}台）" if current_aps is not None else ""))
+    # 通常時は、スキャン結果がいつのものかだけを出す(接続中のチャネルは枠と「接続」の行で分かる)
     age = congestion["age"]
-    notes.append("スキャン中" if congestion["scanning"] else f"{age:.0f}秒前" if age is not None else "")
-    notes.append("推定値")
-    draw_text(" · ".join(n for n in notes if n), x + label_w, note_y, small_font(), secondary)
+    note = "スキャン中" if congestion["scanning"] else f"{age:.0f}秒前の推定値" if age is not None else ""
+    draw_text(note, x + label_w, note_y, small_font(), secondary)
 
 def draw_parts_right(parts, right, y, font, bold_font):
     """[(文字列, 色, 太字か)]を右端そろえで描く"""

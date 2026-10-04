@@ -197,9 +197,4 @@ class CongestionScanner:
             percents = dict(next(b["channels"] for b in bands if b["band"] == band))
             # 接続中のチャネル群のうち、最も混んでいるチャネルの値をその接続の混雑度とする
             result["current_percent"] = max((percents[c] for c in current if c in percents), default=0.0)
-            # 接続中のチャネル群と電波が重なっているAPの数(直近のスキャン。接続先のAP自身も含む)
-            result["current_ap_count"] = sum(
-                1 for ap_band, ap_primary, ap_width, _rssi in history[-1]
-                if ap_band == band and current & occupied_channels(ap_band, ap_primary, ap_width).keys()
-            )
         return result

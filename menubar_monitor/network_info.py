@@ -147,12 +147,11 @@ def get_link_info(iface):
         channel = wifi.wlanChannel()
         band = CHANNEL_BAND_NAMES.get(channel.channelBand()) if channel else None
         width_mhz = CHANNEL_WIDTHS_MHZ.get(channel.channelWidth()) if channel else None
-        if standard:
-            # 6GHz帯を使う802.11axはWi-Fi 6Eと呼ばれる
-            generation = "Wi-Fi 6E" if standard == "802.11ax" and band == "6GHz" else WIFI_GENERATIONS.get(standard)
-            spec_row.append(("Standard", f"{standard} ({generation})" if generation else standard, None))
+        # 6GHz帯を使う802.11axはWi-Fi 6Eと呼ばれる
+        generation = "Wi-Fi 6E" if standard == "802.11ax" and band == "6GHz" else WIFI_GENERATIONS.get(standard)
+        width_text = channels_text = None
         if channel:
-            width = f"{width_mhz}MHz" if width_mhz else "?"
+            width_text = f"{width_mhz}MHz" if width_mhz else "?"
             number = channel.channelNumber()
             channels_text = f"ch {number}"
             if band and width_mhz and width_mhz > 20:
@@ -162,7 +161,13 @@ def get_link_info(iface):
                               if overlap == 1.0)
                 if len(used) > 1:
                     channels_text = f"ch {used[0]}–{used[-1]}"
-            spec_row.append(("Band", f"{band or '?'} / {width} ({channels_text})", None))
+        if standard or channel:
+            # 「Wi-Fi 5 (802.11ac, 5GHz) / 80MHz (ch 52–64)」の形にまとめる(インターフェース名はメニュー側で足す)
+            detail = ", ".join(x for x in (standard, band) if x)
+            text = (generation or "Wi-Fi") + (f" ({detail})" if detail else "")
+            if width_text:
+                text += f" / {width_text} ({channels_text})"
+            spec_row.append(("Connection", text, None))
         # 未接続時はRSSIが0になるので表示しない
         rssi, noise = wifi.rssiValue(), wifi.noiseMeasurement()
         if rssi < 0:
