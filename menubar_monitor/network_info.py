@@ -4,6 +4,7 @@
 (network_monitor.pyはimport時に監視ループが走るため、直接importできない)。
 """
 import json
+import math
 import re
 import subprocess
 import threading
@@ -95,6 +96,14 @@ def estimate_spatial_streams(standard, width_mhz, mcs, rate):
     # 長いガードインターバルでは速度が最大15%程度下がるが、四捨五入で吸収できる
     return max(1, round(rate / per_stream))
 
+def min_spatial_streams(standard, width_mhz, rate):
+    """今の送信レートを出すのに最低限必要なストリーム数。1本の理論最大速度を超えていれば2本以上と分かる"""
+    max_rate, _ = MAX_RATE_PER_STREAM.get(standard, {}).get(width_mhz, (None, None))
+    if max_rate is None or rate <= 0:
+        return None
+    # 表の値は小数1桁に丸めてあるので、丸め誤差で1本多く数えないよう少し余裕を持たせる
+    return max(1, math.ceil(rate / max_rate - 0.01))
+
 def update_spatial_streams():
     while True:
         try:
@@ -177,7 +186,15 @@ def get_link_info(iface):
                 quality_row.append(("Noise", f"{noise} dBm", None))
                 snr = rssi - noise
                 quality_row.append(("SNR", f"{snr} dB", rate_quality(snr, SNR_RATINGS)))
-        streams = spatial_streams.get((iface, channel.channelNumber(), width_mhz)) if channel else None
+        streams = None
+        if channel:
+            key = (iface, channel.channelNumber(), width_mhz)
+            # system_profilerからの推定はMCSとレートの時点がずれて少なく出ることがあるので、
+            # 今の送信レートから分かる下限で補う(リンク速度がMaxを超える矛盾を防ぐ)。補った値も観測値として残す
+            lower = min_spatial_streams(standard, width_mhz, rate)
+            if lower and lower > spatial_streams.get(key, 0):
+                spatial_streams[key] = lower
+            streams = spatial_streams.get(key)
         max_rate = get_max_rate(standard, width_mhz, streams)
         if max_rate and standard not in LEGACY_MAX_RATE:
             max_text = (f"{max_rate:.0f} Mbps", f"(Max, {streams} stream{'s' if streams > 1 else ''})")

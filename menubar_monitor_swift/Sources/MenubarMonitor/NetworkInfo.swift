@@ -104,6 +104,13 @@ private func estimateSpatialStreams(standard: String?, widthMHz: Int, mcs: Int, 
     return Swift.max(1, Int((rate / perStream).rounded()))
 }
 
+/// 今の送信レートを出すのに最低限必要なストリーム数。1本の理論最大速度を超えていれば2本以上と分かる
+private func minSpatialStreams(standard: String?, widthMHz: Int?, rate: Double) -> Int? {
+    guard let standard, let widthMHz, let max = maxRatePerStream[standard]?[widthMHz], rate > 0 else { return nil }
+    // 表の値は小数1桁に丸めてあるので、丸め誤差で1本多く数えないよう少し余裕を持たせる
+    return Swift.max(1, Int((rate / max.rate - 0.01).rounded(.up)))
+}
+
 private func maxRate(standard: String?, widthMHz: Int?, streams: Int?) -> Double? {
     guard let standard else { return nil }
     if let legacy = legacyMaxRate[standard] { return legacy }
@@ -128,6 +135,16 @@ final class SpatialStreams: @unchecked Sendable {
 
     func get(iface: String, channel: Int, widthMHz: Int) -> Int? {
         lock.withLock { streams[Self.key(iface, channel, widthMHz)] }
+    }
+
+    /// 観測したストリーム数を記録する(これまでの最大値より多いときだけ更新する)
+    func observe(iface: String, channel: Int, widthMHz: Int, streams: Int) {
+        let key = Self.key(iface, channel, widthMHz)
+        lock.withLock {
+            if streams > self.streams[key] ?? 0 {
+                self.streams[key] = streams
+            }
+        }
     }
 
     func start() {
@@ -216,8 +233,14 @@ private func wifiLink(_ wifi: CWInterface, iface: String) -> WiFiLink {
         }
         link.quality = quality
     }
-    let streams = channel.flatMap { channel in
-        widthMHz.flatMap { SpatialStreams.shared.get(iface: iface, channel: channel.channelNumber, widthMHz: $0) }
+    var streams: Int?
+    if let channel, let widthMHz {
+        // system_profilerからの推定はMCSとレートの時点がずれて少なく出ることがあるので、
+        // 今の送信レートから分かる下限で補う(リンク速度がMaxを超える矛盾を防ぐ)。補った値も観測値として残す
+        if let lower = minSpatialStreams(standard: standard, widthMHz: widthMHz, rate: rate) {
+            SpatialStreams.shared.observe(iface: iface, channel: channel.channelNumber, widthMHz: widthMHz, streams: lower)
+        }
+        streams = SpatialStreams.shared.get(iface: iface, channel: channel.channelNumber, widthMHz: widthMHz)
     }
     link.maxRate = maxRate(standard: standard, widthMHz: widthMHz, streams: streams)
     return link
