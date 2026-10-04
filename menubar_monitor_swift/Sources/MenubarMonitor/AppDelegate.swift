@@ -54,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var uploadHistory = HistoryBuffer()
     private var diskBusyHistory = HistoryBuffer()
 
-    // アプリ別の一覧(メニューを開いている間だけ集計する。nil=集計中)
+    // アプリ別の一覧(メニューかパネルを出している間だけ集計する。nil=集計中)
     private var menuOpen = false
     private var memoryGroups: [MemoryGroup]?
     private var cpuProcesses: [UsageEntry]?
@@ -63,10 +63,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var netProcesses: [UsageEntry]?
     /// 集計中ならtrue(前回の集計が終わっていなければ次を飛ばし、処理が積み上がらないようにする)
     private var collecting = false
-    /// メニューを閉じるたびに増やす。閉じる前に始めた集計の結果を、次に開いたメニューに出さないために使う
+    /// 集計を止めるたびに増やす。止める前に始めた集計の結果を、次に開いたメニューに出さないために使う
     private var menuGeneration = 0
     /// 一覧に出している件数(メニューを閉じると初期件数に戻す)
     private var visibleCounts: [SectionKey: Int] = [:]
+    /// パネルの一覧に出している件数。メニューとは別に持ち、パネルを閉じるまで保つ
+    private var panelVisibleCounts: [SectionKey: Int] = [:]
+
+    /// ほかの場所をクリックしても閉じないパネル(初めて出すときに作る)
+    private var panel: MonitorPanel?
+    private var panelVisible: Bool { panel?.isVisible == true }
+    /// メニューかパネルを出している間は、アプリ別の集計とWi-Fiのスキャンを続ける
+    private var monitoring: Bool { menuOpen || panelVisible }
 
     // 設定
     private var displayMode = DisplayMode.number
@@ -105,6 +113,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coreOrder = (0..<coreCount).filter { coreLabels[$0].hasPrefix("P") } + (0..<coreCount).filter { !coreLabels[$0].hasPrefix("P") }
 
         statusItem.menu = buildMenu()
+        // 前回パネルを出したまま終了していたら、また出す
+        if defaults.bool(forKey: "panelVisible") {
+            showPanel()
+        }
 
         // 初回は基準値の取得のみ
         _ = cpu.sample()
@@ -132,6 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func resetVisibleCounts() {
         for key in SectionKey.allCases {
             visibleCounts[key] = Self.initialVisible(key)
+            panelVisibleCounts[key] = Self.initialVisible(key)
         }
     }
 
@@ -197,6 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 非表示の設定を、メニュー内の欄・区切り線・サブメニューのチェックに反映する
     private func applySectionVisibility() {
+        let firstVisibleView = SectionKey.allCases.first { !hiddenSections.contains($0) }.flatMap { sectionViews[$0] }
         var first = true
         for key in SectionKey.allCases {
             let hidden = hiddenSections.contains(key)
@@ -204,7 +218,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             sectionSeparators[key]?.isHidden = hidden || first
             first = first && hidden
             visibilityItems[key]?.state = hidden ? .off : .on
+            // パネルに固定表示するピンのボタンは、メニューの一番上に見えている欄の見出しに出す
+            sectionViews[key]?.onPin = !hidden && sectionViews[key] === firstVisibleView ? { [weak self] in self?.pinToPanel() } : nil
         }
+        panel?.hiddenSections = hiddenSections
         // 最後の1つまで隠すとメニューバーのアイコンが消えてメニューを開けなくなるので、外せないようにする
         let visible = SectionKey.allCases.filter { !hiddenSections.contains($0) }
         for (key, item) in visibilityItems {
@@ -252,7 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         syncHistoryCheckmarks()
         // 記録は最長分を取ってあるので、表示する長さを変えるだけで過去の分もすぐ出る
         HistoryConfig.setMinutes(minutes)
-        if menuOpen {
+        if monitoring {
             refreshSections()
         }
     }
@@ -260,15 +277,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === statusItem.menu else { return }
         menuOpen = true
-        // Wi-Fiスキャンは通信を一瞬遅らせるので、メニューを開いている間だけ行う
-        congestion.activate()
-        refreshProcesses()
-        refreshSections()
+        startMonitoring()
     }
 
     func menuDidClose(_ menu: NSMenu) {
         guard menu === statusItem.menu else { return }
         menuOpen = false
+        // 「さらに表示」で広げた一覧は、次に開いたときは初期件数に戻しておく
+        for key in SectionKey.allCases {
+            visibleCounts[key] = Self.initialVisible(key)
+        }
+        stopMonitoringIfIdle()
+    }
+
+    // MARK: - パネル
+
+    /// メニューのピンのボタンから、同じ内容をパネルに出してメニューを閉じる
+    private func pinToPanel() {
+        showPanel()
+        statusItem.menu?.cancelTracking()
+    }
+
+    private func showPanel() {
+        if panel == nil {
+            let panel = MonitorPanel()
+            panel.hiddenSections = hiddenSections
+            panel.onClose = { [weak self] in self?.panelDidClose() }
+            self.panel = panel
+        }
+        defaults.set(true, forKey: "panelVisible")
+        panel?.show()
+        startMonitoring()
+    }
+
+    private func panelDidClose() {
+        defaults.set(false, forKey: "panelVisible")
+        for key in SectionKey.allCases {
+            panelVisibleCounts[key] = Self.initialVisible(key)
+        }
+        // 閉じる通知の時点ではまだ表示中扱いなので、閉じ終わってから判定する
+        DispatchQueue.main.async { [weak self] in self?.stopMonitoringIfIdle() }
+    }
+
+    // MARK: - 集計の開始と停止
+
+    private func startMonitoring() {
+        // Wi-Fiスキャンは通信を一瞬遅らせるので、メニューかパネルを出している間だけ行う
+        congestion.activate()
+        refreshProcesses()
+        refreshSections()
+    }
+
+    /// メニューもパネルも出ていなければ、アプリ別の集計とWi-Fiのスキャンを止める
+    private func stopMonitoringIfIdle() {
+        guard !monitoring else { return }
         congestion.deactivate()
         menuGeneration += 1
         // 次に開いたとき、閉じていた間の平均ではなく直近の使用率を出すため基準を捨てる
@@ -277,8 +339,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cpuProcesses = nil
         diskProcesses = nil
         netProcesses = nil
-        // 「さらに表示」で広げた一覧は、次に開いたときは初期件数に戻しておく
-        resetVisibleCounts()
     }
 
     // MARK: - 更新
@@ -303,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         uploadHistory.append(net.upload)
         render()
 
-        if menuOpen {
+        if monitoring {
             refreshProcesses()
             refreshSections()
         }
@@ -330,7 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.image = StatusImage.build(visible, height: barHeight, mode: displayMode)
     }
 
-    /// アプリ別の集計はメニューを開いている間だけ、バックグラウンドで行う。結果が届いたら欄を描き直す
+    /// アプリ別の集計はメニューかパネルを出している間だけ、バックグラウンドで行う。結果が届いたら欄を描き直す
     private func refreshProcesses() {
         guard !collecting else { return }
         collecting = true
@@ -340,7 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             collecting = false
             guard generation == menuGeneration else {
                 // 閉じる前に始めた集計だった。もう開き直していれば、改めて集計する
-                if menuOpen { refreshProcesses() }
+                if monitoring { refreshProcesses() }
                 return
             }
             // メモリの一覧は閉じても残し、次に開いたときに前回の一覧を出して欄の高さの変化を抑える
@@ -349,24 +409,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             gpuProcesses = results.gpu
             diskProcesses = results.disk
             netProcesses = results.net
-            if menuOpen { refreshSections() }
+            if monitoring { refreshSections() }
         }
     }
 
-    private func actions(_ key: SectionKey) -> PagerActions {
+    private func actions(_ key: SectionKey, inPanel: Bool) -> PagerActions {
         PagerActions(more: { [weak self] visible in
-            self?.visibleCounts[key] = visible
-            // 次のタイマーを待たず、その場で高さを変えて描き直す
-            self?.refreshSections()
+            self?.setVisibleCount(visible, for: key, inPanel: inPanel)
         }, collapse: { [weak self] in
-            self?.visibleCounts[key] = Self.initialVisible(key)
-            self?.refreshSections()
+            self?.setVisibleCount(Self.initialVisible(key), for: key, inPanel: inPanel)
         })
     }
 
+    private func setVisibleCount(_ count: Int, for key: SectionKey, inPanel: Bool) {
+        if inPanel {
+            panelVisibleCounts[key] = count
+        } else {
+            visibleCounts[key] = count
+        }
+        // 次のタイマーを待たず、その場で高さを変えて描き直す
+        refreshSections()
+    }
+
+    /// メニューとパネルの欄を、それぞれの表示件数で描き直す
     private func refreshSections() {
-        func visible(_ key: SectionKey) -> Int { visibleCounts[key] ?? Self.initialVisible(key) }
-        let sections: [SectionKey: Section] = [
+        let congestion = congestion.snapshot()
+        if menuOpen {
+            apply(makeSections(counts: visibleCounts, inPanel: false, congestion: congestion), to: sectionViews)
+        }
+        if let panel, panel.isVisible {
+            apply(makeSections(counts: panelVisibleCounts, inPanel: true, congestion: congestion), to: panel.sectionViews)
+            panel.layoutSections()
+        }
+    }
+
+    private func apply(_ sections: [SectionKey: Section], to views: [SectionKey: SectionView]) {
+        for (key, section) in sections {
+            views[key]?.setSection(section)
+        }
+    }
+
+    private func makeSections(counts: [SectionKey: Int], inPanel: Bool, congestion: CongestionSnapshot?) -> [SectionKey: Section] {
+        func visible(_ key: SectionKey) -> Int { counts[key] ?? Self.initialVisible(key) }
+        func actions(_ key: SectionKey) -> PagerActions { self.actions(key, inPanel: inPanel) }
+        return [
             .cpu: cpuSection(percent: cpuPercent, coreRows: coreOrder.map { (coreLabels[$0], coreHistories[$0].values) },
                              processes: cpuProcesses, visible: visible(.cpu), actions: actions(.cpu)),
             .memory: memorySection(mem: memory, groups: memoryGroups, visible: visible(.memory), actions: actions(.memory)),
@@ -375,11 +461,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .storage: storageSection(storage: storage, diskIO: disk, busyHistory: diskBusyHistory.values,
                                      processes: diskProcesses, visible: visible(.storage), actions: actions(.storage)),
             .network: networkSection(net: net, downloadHistory: downloadHistory.values, uploadHistory: uploadHistory.values,
-                                     congestion: congestion.snapshot(), processes: netProcesses, visible: visible(.network),
+                                     congestion: congestion, processes: netProcesses, visible: visible(.network),
                                      actions: actions(.network)),
         ]
-        for (key, section) in sections {
-            sectionViews[key]?.setSection(section)
-        }
     }
 }

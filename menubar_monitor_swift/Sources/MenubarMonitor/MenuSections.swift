@@ -191,7 +191,7 @@ func cpuSection(percent: Double?, coreRows: [(label: String, history: [Double])]
     let table = UsageTable(y: padY + Layout.titleHeight + heatHeight + smallRowHeight + 8, processes: processes,
                            visible: visible, collapsed: Ranking.collapsed, valueHeader: "CPU",
                            color: .secondaryLabelColor, emptyText: "CPUを使っているアプリはありません")
-    return Section(height: table.y + table.height + padY, draw: { width, hover in
+    return Section(title: "CPU", height: table.y + table.height + padY, draw: { width, hover in
         drawTitle(width, padY, "CPU", percentParts(percent))
         let labelFont = Fonts.monoSmall(7)
         let labelOffset = (Layout.heatCellHeight - labelFont.ascender + labelFont.descender) / 2
@@ -256,7 +256,7 @@ func memorySection(mem: MemoryUsage?, groups: [MemoryGroup]?, visible: Int, acti
     let processRows = groups.isEmpty ? 1 : rows + (pager.visible ? 1 : 0)
     let height = tableY + smallRowHeight + rowHeight * CGFloat(processRows) + padY
 
-    return Section(height: height, draw: { width, hover in
+    return Section(title: "Memory", height: height, draw: { width, hover in
         guard let mem else {
             drawTitle(width, padY, "Memory", percentParts(nil))
             return
@@ -328,7 +328,7 @@ func gpuSection(gpu: GPUUsage?, history: [Double], processes: [UsageEntry]?, vis
     let table = UsageTable(y: padY + Layout.titleHeight + Layout.percentChartHeight + 7, processes: processes,
                            visible: visible, collapsed: Ranking.topGPU, valueHeader: "GPU", color: .systemPurple,
                            emptyText: "GPUを使っているアプリはありません")
-    return Section(height: table.y + table.height + padY, draw: { width, hover in
+    return Section(title: "GPU", height: table.y + table.height + padY, draw: { width, hover in
         if let gpu {
             // 見出しの右: GPUが使用中のメモリと使用率
             let memory = gpu.memory.map {
@@ -365,7 +365,7 @@ func storageSection(storage: StorageUsage?, diskIO: DiskIO?, busyHistory: [Doubl
     }
     let table = UsageTable(y: chartsY + chartsHeight + 4, processes: estimated, visible: visible, collapsed: Ranking.topDisk,
                            valueHeader: "Busy (est.)", color: .systemTeal, emptyText: "ディスクを読み書きしているアプリはありません")
-    return Section(height: table.y + table.height + padY, draw: { width, hover in
+    return Section(title: "Storage", height: table.y + table.height + padY, draw: { width, hover in
         if let storage {
             // 見出しの右: 残り容量(パージ可能領域を含む)/全体と、ビジー率。どちらもメニューバーのSSDの表示と同じ値
             let secondary = secondaryText()
@@ -445,7 +445,7 @@ func networkSection(net: NetworkStatus?, downloadHistory: [Double], uploadHistor
             "\(formatMbps(rest.reduce(0) { $0 + $1.up })) / \(formatMbps(rest.reduce(0) { $0 + $1.down })) Mbps"
         })
 
-    return Section(height: table.y + table.height + padY, draw: { width, hover in
+    return Section(title: "Network", height: table.y + table.height + padY, draw: { width, hover in
         guard let net else {
             drawTitle(width, padY, "Network", percentParts(nil))
             return

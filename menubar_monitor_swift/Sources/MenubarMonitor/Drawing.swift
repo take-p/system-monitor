@@ -224,18 +224,23 @@ func drawTextFit(_ text: String, _ x: CGFloat, _ y: CGFloat, _ maxWidth: CGFloat
     string.draw(at: NSPoint(x: x, y: y))
 }
 
+/// SF Symbolsのアイコンを本文の文字の大きさで作る
+func symbolImage(_ name: String, _ color: NSColor, variable: Double? = nil) -> NSImage? {
+    let base = variable.map { NSImage(systemSymbolName: name, variableValue: $0, accessibilityDescription: nil) }
+        ?? NSImage(systemSymbolName: name, accessibilityDescription: nil)
+    // 階層カラーにすると、点灯していない段は同じ色の薄い色で描かれる
+    let config = NSImage.SymbolConfiguration(pointSize: Fonts.body().pointSize, weight: .regular)
+        .applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
+    return base?.withSymbolConfiguration(config)
+}
+
 /// SF Symbolsのアイコンを行の上下中央に描き、右端のx座標を返す。
 /// variable(0〜1)を渡すと、Wi-Fiアイコンなどの点灯段数をその値に応じて変える。
 /// alignRightならxを右端としてその左側に描く
 @discardableResult
 func drawSymbol(_ name: String, _ x: CGFloat, _ y: CGFloat, _ rowHeight: CGFloat, _ color: NSColor,
                 variable: Double? = nil, alignRight: Bool = false) -> CGFloat {
-    let base = variable.map { NSImage(systemSymbolName: name, variableValue: $0, accessibilityDescription: nil) }
-        ?? NSImage(systemSymbolName: name, accessibilityDescription: nil)
-    // 階層カラーにすると、点灯していない段は同じ色の薄い色で描かれる
-    let config = NSImage.SymbolConfiguration(pointSize: Fonts.body().pointSize, weight: .regular)
-        .applying(NSImage.SymbolConfiguration(hierarchicalColor: color))
-    guard let image = base?.withSymbolConfiguration(config) else { return x }
+    guard let image = symbolImage(name, color, variable: variable) else { return x }
     let size = image.size
     let left = alignRight ? x - size.width : x
     image.draw(in: NSRect(x: left, y: y + (rowHeight - size.height) / 2, width: size.width, height: size.height),
