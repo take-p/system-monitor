@@ -113,6 +113,17 @@ def free_color(available_bytes):
         return NSColor.systemOrangeColor()
     return None
 
+# 補助の文字色。メニューの自前描画にはmacOS標準のメニューのようなバイブランシーが効かず、
+# secondaryLabelColor/tertiaryLabelColorのままだと灰色の背景に対して薄すぎて読みにくい。
+# 標準のメニューの見出しに近い濃さになるよう、本文の色の不透明度を下げて作る(ライト/ダークに追従する)
+def secondary_text():
+    """「Process (grouped)」「電波」「さらに表示」など、本文より一段控えめな文字"""
+    return NSColor.labelColor().colorWithAlphaComponent_(0.75)
+
+def tertiary_text():
+    """「10分前 / 現在」「残り◯アプリ」や目盛りの値など、さらに控えめな文字"""
+    return NSColor.labelColor().colorWithAlphaComponent_(0.55)
+
 def nice_ceil(value):
     """グラフの上限を1/2/5×10^nの切りの良い値に切り上げる(network_monitor.pyと同じ)。"""
     value = max(value, MIN_SCALE_MBPS)
@@ -272,10 +283,10 @@ def draw_percent_chart(x, y, width, history, color):
     上端に100%の目盛り線を薄く引き、ほかのグラフと同じく左上に目盛りの値を添える"""
     fill_rect(x, y, width, 0.5, NSColor.tertiaryLabelColor())
     draw_history_chart(x, y, width, CHART_HEIGHT, recent(history), 100, color)
-    draw_text("100%", x + 3, y + 1, mono_small_font(), NSColor.tertiaryLabelColor())
+    draw_text("100%", x + 3, y + 1, mono_small_font(), tertiary_text())
     footer_y = y + CHART_HEIGHT + 1
-    draw_text(HISTORY_LABEL, x, footer_y, small_font(), NSColor.tertiaryLabelColor())
-    draw_text_right("現在", x + width, footer_y, small_font(), NSColor.tertiaryLabelColor())
+    draw_text(HISTORY_LABEL, x, footer_y, small_font(), tertiary_text())
+    draw_text_right("現在", x + width, footer_y, small_font(), tertiary_text())
 
 MIRROR_HALF_HEIGHT = 24  # 上下対称グラフの片側の高さ(pt)
 # draw_mirror_chart 1つ分の高さ(上の見出し + グラフ上下 + 下の見出し + 余白)
@@ -298,7 +309,7 @@ def draw_mirror_chart(x, y, width, unit, top, bottom):
         draw_parts([(f"{label}  ", None), (f"{value:.2f} {unit}", None)], x + 12, header_y, small_font())
         # 起動からの合計は、どちらの向きの合計か分かるよう各系列の見出しに並べる
         draw_text_right(f"Peak {peak:.2f} {unit} · Total {total_text}", x + width, header_y,
-                        small_font(), NSColor.secondaryLabelColor())
+                        small_font(), secondary_text())
         # 外側の端(上半分は上端、下半分は下端)に、縦軸の上限の目盛り線を薄く引く(GPUのグラフと同じ)
         edge_y = middle + MIRROR_HALF_HEIGHT - 0.5 if downward else chart_y
         fill_rect(x, edge_y, width, 0.5, NSColor.tertiaryLabelColor())
@@ -307,12 +318,12 @@ def draw_mirror_chart(x, y, width, unit, top, bottom):
         # 目盛り(縦軸の上限)は、グラフの外側の端(上半分は左上、下半分は左下)に小さく添える
         font = mono_small_font()
         label_y = (middle + MIRROR_HALF_HEIGHT - font.ascender() + font.descender() - 1) if downward else chart_y + 1
-        draw_text(f"{scale:g} {unit}{note}", x + 3, label_y, font, NSColor.tertiaryLabelColor())
+        draw_text(f"{scale:g} {unit}{note}", x + 3, label_y, font, tertiary_text())
     return y + MIRROR_CHART_HEIGHT
 
 def percent_parts(percent, fmt="{:.1f}%"):
     if percent is None:
-        return [("--", NSColor.secondaryLabelColor())]
+        return [("--", secondary_text())]
     # 灰色がかったメニュー背景では赤/オレンジの文字が読みにくいので、数値は標準色にする
     return [(fmt.format(percent), None)]
 
@@ -413,7 +424,7 @@ def cpu_section(percent, core_rows, processes=None, visible=COLLAPSED_PROCESSES,
         for core, (label, history) in enumerate(core_rows):
             row_y = y + core * (HEAT_CELL_HEIGHT + HEAT_ROW_GAP)
             draw_text_right(label, grid_x - 4, row_y + label_offset, label_font,
-                            NSColor.secondaryLabelColor())
+                            secondary_text())
             fill_rect(grid_x, row_y, grid_w, HEAT_CELL_HEIGHT,
                       NSColor.quaternaryLabelColor().colorWithAlphaComponent_(0.25))
             history = recent(history)
@@ -424,8 +435,8 @@ def cpu_section(percent, core_rows, processes=None, visible=COLLAPSED_PROCESSES,
                 fill_rect(grid_x + (start + i) * cell_w, row_y, cell_w - 0.5 if cell_w >= 3 else cell_w + 0.2,
                           HEAT_CELL_HEIGHT, heat_color(value))
         footer_y = y + heat_height + 1
-        draw_text(HISTORY_LABEL, grid_x, footer_y, small_font(), NSColor.tertiaryLabelColor())
-        draw_text_right("現在", width - PAD_X, footer_y, small_font(), NSColor.tertiaryLabelColor())
+        draw_text(HISTORY_LABEL, grid_x, footer_y, small_font(), tertiary_text())
+        draw_text_right("現在", width - PAD_X, footer_y, small_font(), tertiary_text())
 
         # CPUを使っているアプリの上位(CPU全体=100%)
         table.draw(width, hover)
@@ -473,7 +484,7 @@ class PagerRow:
         note=Falseなら左側の文言を出さない(一覧自体が空で、その旨を別に出しているとき)"""
         if not (self.visible or show_empty):
             return
-        font, secondary = body_font(), NSColor.secondaryLabelColor()
+        font, secondary = body_font(), secondary_text()
         # 押せることが分かるよう、ホバー中の側だけ背景を薄く敷く
         zone = self.zone(hover)
         if zone == "more":
@@ -488,9 +499,9 @@ class PagerRow:
             # 補足が長い(上り/下りの値など)と右端の「折りたたむ」に重なるので、収まらなければ末尾を省略する
             note_right = self.collapse_x - 4 if self.can_collapse else width - PAD_X
             draw_text_fit(f"  {self.rest_note}", end, self.y + 2, note_right - end, small_font(),
-                          NSColor.tertiaryLabelColor())
+                          tertiary_text())
         elif note:
-            draw_text(self.empty_note, PAD_X, self.y, font, NSColor.tertiaryLabelColor())
+            draw_text(self.empty_note, PAD_X, self.y, font, tertiary_text())
         if self.can_collapse:
             text = attributed("折りたたむ", font, secondary)
             text_x = width - PAD_X - text.size().width
@@ -506,8 +517,9 @@ class UsageTable:
     「さらに表示」を出す必要がないときは、末尾の行に「ほかのアプリはありません」と出す"""
 
     def __init__(self, y, processes, visible, collapsed, value_header, color, empty_text,
-                 format_value="{:.1f}%".format, bar_max=100, format_entry=None, format_rest=None):
+                 format_value="{:.1f}%".format, bar_max=100, format_entry=None, format_rest=None, name_w=210):
         """format_value: 値を表示文字列にする関数、bar_max: バーが満杯になる値(Noneなら1位の値)、
+        name_w: 名前の欄の幅(値の文字列が長い表では狭めてバーの幅を確保する)、
         format_entry: 行(タプル全体)から表示文字列を作る関数(上り/下りのように値を複数出すとき)、
         format_rest: 一覧に出ていない残りの行から、末尾の行の補足を作る関数"""
         self.y = y
@@ -515,6 +527,7 @@ class UsageTable:
         self.shown = (processes or [])[:visible]
         remaining = (processes or [])[visible:]
         self.value_header, self.color, self.empty_text = value_header, color, empty_text
+        self.name_w = name_w
         self.format_entry = format_entry or (lambda entry: format_value(entry[1]))
         self.bar_max = bar_max if bar_max is not None else max((e[1] for e in processes or []), default=0)
         rest_text = format_rest(remaining) if format_rest else format_value(sum(e[1] for e in remaining))
@@ -527,7 +540,7 @@ class UsageTable:
         self.pager.click(point, on_more, on_collapse)
 
     def draw(self, width, hover):
-        name_w = 210
+        name_w = self.name_w
         bar_x = PAD_X + name_w + 10
         value_right = width - PAD_X
         font = body_font()
@@ -535,7 +548,7 @@ class UsageTable:
         # 値の欄は「959 KB/s」のような長い値でもバーに重ならないよう、表示中の値の幅に合わせる
         value_w = max([attributed(self.format_entry(e), mono).size().width for e in self.shown] + [40])
         bar_len = value_right - value_w - 10 - bar_x
-        secondary = NSColor.secondaryLabelColor()
+        secondary = secondary_text()
         draw_text("Process (grouped)", PAD_X, self.y, small_font(), secondary)
         draw_text_right(self.value_header, value_right, self.y, small_font(), secondary)
 
@@ -571,7 +584,7 @@ def gpu_section(gpu, history, processes=None, visible=TOP_GPU_PROCESSES, on_more
             draw_title(width, PAD_Y, "GPU", percent_parts(None))
         else:
             # 見出しの右: GPUが使用中のメモリと使用率
-            memory = [("Memory Usage ", NSColor.secondaryLabelColor()), (f"{gpu['memory'] / GB:.1f} GB  ", None)]
+            memory = [("Memory Usage ", secondary_text()), (f"{gpu['memory'] / GB:.1f} GB  ", None)]
             draw_title(width, PAD_Y, "GPU", (memory if gpu["memory"] is not None else [])
                        + percent_parts(gpu["percent"], "{:.0f}%"))
         draw_percent_chart(PAD_X, PAD_Y + TITLE_HEIGHT, width - PAD_X * 2, history, NSColor.systemPurpleColor())
@@ -641,7 +654,7 @@ def memory_section(mem, groups, visible=COLLAPSED_PROCESSES, on_more=None, on_co
         bar_x = procs_right + 10
         size_right = width - PAD_X
         bar_len = size_right - 62 - bar_x
-        secondary = NSColor.secondaryLabelColor()
+        secondary = secondary_text()
         draw_text("Process (grouped)", PAD_X, table_y, small_font(), secondary)
         draw_text_right("Procs", procs_right, table_y, small_font(), secondary)
         draw_text_right("Footprint", size_right, table_y, small_font(), secondary)
@@ -657,7 +670,7 @@ def memory_section(mem, groups, visible=COLLAPSED_PROCESSES, on_more=None, on_co
             draw_text_fit(name, PAD_X, row_y, name_w, font)
             draw_text_right(str(count), procs_right, row_y, mono, secondary)
             # 上の内訳バー(Wired=赤, Compressed=黄)と混同しないよう、バーはグレー1色にする
-            draw_bar(bar_x, row_y + 5, bar_len, footprint_mb / max_mb, secondary, h=6)
+            draw_bar(bar_x, row_y + 5, bar_len, footprint_mb / max_mb, NSColor.secondaryLabelColor(), h=6)
             draw_text_right(format_footprint(footprint_mb), size_right, row_y, mono)
             row_y += ROW_HEIGHT
         if show_unmeasured:
@@ -695,7 +708,7 @@ def storage_section(storage, disk_io=None, busy_history=(),
             draw_title(width, PAD_Y, "Storage", percent_parts(None))
         else:
             # 見出しの右: 残り容量(パージ可能領域を含む)/全体と、ビジー率。どちらもメニューバーのSSDの表示と同じ値
-            secondary = NSColor.secondaryLabelColor()
+            secondary = secondary_text()
             busy = [("   Busy ", secondary), (f"{disk_io['busy']:.0f}%", None)] if disk_io else []
             draw_title(width, PAD_Y, "Storage", [
                 ("Free ", secondary),
@@ -709,7 +722,7 @@ def storage_section(storage, disk_io=None, busy_history=(),
             draw_percent_chart(PAD_X, charts_y, width - PAD_X * 2, busy_history, NSColor.systemTealColor())
             # 今の読み書き速度は、左上の目盛り(100%)の反対側に添える(ネットワークと同じく↑書き込み・↓読み込みの順)
             draw_text_right(f"↑ {disk_io['write']:.1f} MB/s   ↓ {disk_io['read']:.1f} MB/s", width - PAD_X - 3,
-                            charts_y + 1, mono_small_font(), NSColor.secondaryLabelColor())
+                            charts_y + 1, mono_small_font(), secondary_text())
 
         # ディスクを読み書きしているアプリの上位
         table.draw(width, hover)
@@ -740,11 +753,16 @@ def network_section(net, dl_history, ul_history, congestion=None,
     # バーは回線全体(グラフのUpload+Download)に占める割合。計測のずれでアプリが全体を上回ることがあるので1位も下限にする
     line_total = (net["ul"] + net["dl"]) if net else 0
     top = processes[0][1] if processes else 0
+    bar_max = max(line_total, top)
     # アプリ別の表は、接続の詳細(電波・リンク・規格・混雑度)の下、欄の末尾に置く
     table_y = PAD_Y + TITLE_HEIGHT + MIRROR_CHART_HEIGHT + 4 + ROW_HEIGHT * text_rows + congestion_block + 4
-    table = UsageTable(table_y, processes, visible, TOP_NET_PROCESSES, "↑ / ↓",
-                       NSColor.systemBlueColor(), "通信しているアプリはありません", bar_max=max(line_total, top),
-                       format_entry=lambda e: f"{format_mbps(e[2])} / {format_mbps(e[3])} Mbps",
+    table = UsageTable(table_y, processes, visible, TOP_NET_PROCESSES, "↑ / ↓  Share",
+                       # バーは上り+下りの合計なので、Download(青)と紛らわしくないようグレーにする
+                       NSColor.secondaryLabelColor(), "通信しているアプリはありません", bar_max=bar_max,
+                       # 値の後ろに、バーと同じ基準(回線全体の上り+下りに占める割合)の数値を添える
+                       format_entry=lambda e: f"{format_mbps(e[2])} / {format_mbps(e[3])} Mbps  "
+                                              f"{min(e[1] / bar_max, 1) * 100 if bar_max else 0:3.0f}%",
+                       name_w=140,
                        format_rest=lambda rest: f"{format_mbps(sum(e[2] for e in rest))} / "
                                                 f"{format_mbps(sum(e[3] for e in rest))} Mbps")
     height = table.y + table.height + PAD_Y
@@ -757,7 +775,7 @@ def network_section(net, dl_history, ul_history, congestion=None,
             draw_title(width, PAD_Y, "Network", percent_parts(None))
             return
         font = body_font()
-        secondary = NSColor.secondaryLabelColor()
+        secondary = secondary_text()
 
         # 見出し: 右端に接続方式のアイコンとインターフェース名
         draw_text("Network", PAD_X, PAD_Y, title_font())
@@ -825,7 +843,8 @@ def network_section(net, dl_history, ul_history, congestion=None,
             value = f"{link:.0f} / {max_rate:.0f} Mbps"
             value_w = attributed(value, font).size().width
             gauge_w = width - PAD_X * 2 - label_w - value_w - 12
-            draw_bar(PAD_X + label_w, y + 5, gauge_w, link / max_rate, NSColor.systemBlueColor())
+            # 青はDownloadのグラフと紛らわしいので、上り/下りのどちらでもないリンク速度はグレーにする
+            draw_bar(PAD_X + label_w, y + 5, gauge_w, link / max_rate, NSColor.secondaryLabelColor())
             draw_text(value, width - PAD_X - value_w, y, font)
         else:
             # 理論最大速度が分からない(有線・推定中など)場合はリンク速度だけを出す
@@ -863,7 +882,7 @@ def draw_congestion(congestion, x, y, width, label_w, hover=None):
     セルの大きさは全帯域でそろえ、接続中のチャネル群は枠で囲む。
     右端は接続中の帯域なら接続中の混雑度、それ以外はその帯域で最も空いているチャネルを出す"""
     font = body_font()
-    secondary = NSColor.secondaryLabelColor()
+    secondary = secondary_text()
     draw_text("混雑", x, y, font, secondary)
     bands = congestion["bands"]
     if bands is None:
