@@ -110,12 +110,11 @@ func secondaryText() -> NSColor { NSColor.labelColor.withAlphaComponent(0.75) }
 /// 「10分前 / 現在」「残り◯アプリ」や目盛りの値など、さらに控えめな文字
 func tertiaryText() -> NSColor { NSColor.labelColor.withAlphaComponent(0.55) }
 
-/// 20%刻みの5段階で色分けする(青/緑/黄/橙/赤)
+/// 25%刻みの4段階で色分けする(0〜25%未満: 青、〜50%未満: 緑、〜75%未満: 黄、75%以上: 赤)
 func heatColor(_ percent: Double) -> NSColor {
-    if percent >= 80 { return .systemRed }
-    if percent >= 60 { return .systemOrange }
-    if percent >= 40 { return .systemYellow }
-    if percent >= 20 { return .systemGreen }
+    if percent >= 75 { return .systemRed }
+    if percent >= 50 { return .systemYellow }
+    if percent >= 25 { return .systemGreen }
     return .systemBlue
 }
 
