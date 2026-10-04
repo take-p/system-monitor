@@ -58,6 +58,7 @@ VALUE_WIDTH_SAMPLE = "100%"
 GRAPH_DIAMETER = 15     # 円グラフ/ドーナツグラフの直径(pt)
 DONUT_LINE_WIDTH = 3    # ドーナツグラフのリングの太さ(pt)
 BAR_WIDTH = 7           # 縦棒グラフの幅(pt)。高さは円グラフの直径と揃える
+SUFFIX_GAP = 4          # 値と補足(SSDの残り容量)の間(pt)
 NET_FONT_SIZE = 9       # ネットワークの上り/下り2段表示の文字サイズ(pt)
 NET_LINE_GAP = 2.5      # 上り/下りの行間(pt)
 # 上り/下りの欄はこの文字列の幅で固定し右寄せする(1Gbps超の回線でも幅が揺れないように)
@@ -233,9 +234,17 @@ def format_percent_parts(percent, color):
     padding = "0" * max(PERCENT_DIGITS - len(number), 0)
     return [(padding, NSColor.tertiaryLabelColor()), (f"{number}%", color)]
 
+def format_free_lines(available_bytes):
+    """SSDの残り容量を「Free / 142GB」の2段にする。
+    残り容量はほとんど変わらず表示幅も揺れにくいので、使用率やネットワークと違って0埋めはしない"""
+    if available_bytes is None:
+        return [[("Free", None)], [("--GB", NSColor.secondaryLabelColor())]]
+    return [[("Free", None)], [(f"{available_bytes / 1000 ** 3:.0f}GB", None)]]
+
 def build_status_image(segments, height, mode):
-    """segments: [(label, value, color)] から縦書きラベル付きの画像を作る。
+    """segments: [(label, value, color[, suffix])] から縦書きラベル付きの画像を作る。
     valueは使用率(float)、取得失敗のNone、または複数行表示する行のリスト(各行は[(文字列, 色)])。
+    suffix(行のリスト)を渡すと、値の右に2段などで左寄せに添える(SSDの残り容量など)。
     mode: "number" / "pie" / "donut" / "bar"。使用率の項目だけがmodeに従い、
     Noneはどのモードでも「--」、行のリストはmodeに関係なくそのまま表示する
     """
@@ -254,22 +263,42 @@ def build_status_image(segments, height, mode):
 
     layout = []
     x = 0.0
-    for i, (label, value, color) in enumerate(segments):
+    for i, (label, value, color, *rest) in enumerate(segments):
         if i > 0:
             x += SEGMENT_GAP
         letters = [_attributed(ch, label_font) for ch in label]
         label_width = max(letter.size().width for letter in letters)
         value_width = lines_width if isinstance(value, list) else percent_width
-        layout.append((x, label_width, letters, value, color, value_width))
+        suffix = rest[0] if rest else None
+        # 補足の幅は一番長い行に合わせる(残り容量は桁がめったに変わらないので固定幅にしない)
+        suffix_width = max(
+            (sum(_attributed(text, lines_font).size().width for text, _ in parts) for parts in suffix),
+            default=0,
+        ) if suffix else 0
+        layout.append((x, label_width, letters, value, color, value_width, suffix, suffix_width))
         x += label_width + LABEL_VALUE_GAP + value_width
+        if suffix is not None:
+            x += SUFFIX_GAP + suffix_width
     total_width = x
 
     label_cap = label_font.capHeight()
     value_cap = value_font.capHeight()
     lines_cap = lines_font.capHeight()
 
+    def draw_lines(lines, left, width, color, align_right=True):
+        """複数行のテキストを上下中央にまとめて置く(ネットワークの上り/下り、SSDの残り容量)"""
+        block_height = len(lines) * lines_cap + (len(lines) - 1) * NET_LINE_GAP
+        line_cap_top = (height - block_height) / 2
+        for parts in lines:
+            line = NSMutableAttributedString.alloc().init()
+            for text, part_color in parts:
+                line.appendAttributedString_(_attributed(text, lines_font, part_color or color))
+            line_x = left + width - line.size().width if align_right else left
+            line.drawAtPoint_((line_x, _draw_y_for_cap_top(lines_font, line_cap_top)))
+            line_cap_top += lines_cap + NET_LINE_GAP
+
     def draw(_rect):
-        for seg_x, label_width, letters, percent, color, value_width in layout:
+        for seg_x, label_width, letters, percent, color, value_width, suffix, suffix_width in layout:
             # ラベルの文字を縦に積み、全体を上下中央に置く
             stack_height = len(letters) * label_cap + (len(letters) - 1) * LABEL_LETTER_GAP
             cap_top = (height - stack_height) / 2
@@ -279,19 +308,11 @@ def build_status_image(segments, height, mode):
                 cap_top += label_cap + LABEL_LETTER_GAP
 
             value_left = seg_x + label_width + LABEL_VALUE_GAP
+            if suffix is not None:
+                # 「Free」の見出しと値の頭がそろうよう左寄せにする
+                draw_lines(suffix, value_left + value_width + SUFFIX_GAP, suffix_width, None, align_right=False)
             if isinstance(percent, list):
-                # 複数行のテキスト(ネットワークの上り/下り)を上下中央にまとめて右寄せで置く
-                block_height = len(percent) * lines_cap + (len(percent) - 1) * NET_LINE_GAP
-                line_cap_top = (height - block_height) / 2
-                for parts in percent:
-                    line = NSMutableAttributedString.alloc().init()
-                    for text, part_color in parts:
-                        line.appendAttributedString_(
-                            _attributed(text, lines_font, part_color or color)
-                        )
-                    line_x = value_left + value_width - line.size().width
-                    line.drawAtPoint_((line_x, _draw_y_for_cap_top(lines_font, line_cap_top)))
-                    line_cap_top += lines_cap + NET_LINE_GAP
+                draw_lines(percent, value_left, value_width, color)
                 continue
 
             if percent is not None and mode in GRAPH_DRAWERS:
@@ -564,7 +585,10 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
             ("CPU", cpu, value_color(cpu) if cpu is not None else None),
             ("RAM", mem and mem["percent"], value_color(mem["percent"]) if mem else None),
             ("GPU", gpu, value_color(gpu) if gpu is not None else None),
-            ("SSD", storage and storage["percent"], value_color(storage["percent"]) if storage else None),
+            # SSDは容量(ほとんど変わらない)ではなく、今の混み具合が分かるビジー率を出す。容量はメニュー内に出す
+            # 右に残り容量(パージ可能領域を含む。Finderと同じ)を「Free / 0142GB」の2段で添える
+            ("SSD", disk_io and disk_io["busy"], value_color(disk_io["busy"]) if disk_io else None,
+             format_free_lines(storage and storage["available"])),
             ("NET", [format_rate_line("↑", net["ul"]), format_rate_line("↓", net["dl"])] if net else None, None),
         ]
         self._render()

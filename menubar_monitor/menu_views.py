@@ -629,7 +629,9 @@ def storage_section(storage, disk_io=None, read_history=(), write_history=(),
         if storage is None:
             draw_title(width, PAD_Y, "Storage", percent_parts(None))
         else:
-            draw_title(width, PAD_Y, "Storage", [
+            # 見出しの右: ディスクのビジー率(メニューバーのSSDの値と同じ)と容量の使用率
+            busy = [("Busy ", NSColor.secondaryLabelColor()), (f"{disk_io['busy']:.0f}%   ", None)] if disk_io else []
+            draw_title(width, PAD_Y, "Storage", busy + [
                 (f"{storage['used'] / STORAGE_GB:.0f} / {storage['total'] / STORAGE_GB:.0f} GB  ", None),
                 *percent_parts(storage["percent"]),
             ])
