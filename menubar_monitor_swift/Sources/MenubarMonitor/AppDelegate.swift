@@ -90,6 +90,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var visibilityItems: [SectionKey: NSMenuItem] = [:]
     private var modeItems: [DisplayMode: NSMenuItem] = [:]
     private var historyItems: [Int: NSMenuItem] = [:]
+    /// 「パネルで表示」の項目(パネルを出している間はチェックを付ける)
+    private var panelItem: NSMenuItem?
 
     private static func initialVisible(_ key: SectionKey) -> Int {
         switch key {
@@ -166,6 +168,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        // 外をクリックしても閉じないパネルに同じ内容を出す。出している間に選ぶとパネルを閉じる
+        let panelItem = menu.addItem(withTitle: "パネルで表示", action: #selector(togglePanel(_:)), keyEquivalent: "")
+        panelItem.target = self
+        panelItem.image = NSImage(systemSymbolName: "pin", accessibilityDescription: nil)
+        // macOS 27からはメニュー項目のSF Symbolsのアイコンが既定で隠れるので、出すよう指定する
+        if #available(macOS 27, *) {
+            panelItem.preferredImageVisibility = .visible
+        }
+        self.panelItem = panelItem
+
         // 表示する項目の切り替えは、メニューが長くならないようサブメニューにまとめる
         let sectionsMenu = NSMenu()
         // 最後の1つを外せなくするのにisEnabledを使うので、自動での有効化を切る
@@ -210,7 +222,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 非表示の設定を、メニュー内の欄・区切り線・サブメニューのチェックに反映する
     private func applySectionVisibility() {
-        let firstVisibleView = SectionKey.allCases.first { !hiddenSections.contains($0) }.flatMap { sectionViews[$0] }
         var first = true
         for key in SectionKey.allCases {
             let hidden = hiddenSections.contains(key)
@@ -218,8 +229,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             sectionSeparators[key]?.isHidden = hidden || first
             first = first && hidden
             visibilityItems[key]?.state = hidden ? .off : .on
-            // パネルに固定表示するピンのボタンは、メニューの一番上に見えている欄の見出しに出す
-            sectionViews[key]?.onPin = !hidden && sectionViews[key] === firstVisibleView ? { [weak self] in self?.pinToPanel() } : nil
         }
         panel?.hiddenSections = hiddenSections
         // 最後の1つまで隠すとメニューバーのアイコンが消えてメニューを開けなくなるので、外せないようにする
@@ -292,10 +301,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - パネル
 
-    /// メニューのピンのボタンから、同じ内容をパネルに出してメニューを閉じる
-    private func pinToPanel() {
-        showPanel()
-        statusItem.menu?.cancelTracking()
+    @objc private func togglePanel(_ sender: NSMenuItem) {
+        if panelVisible {
+            panel?.close()
+        } else {
+            showPanel()
+        }
     }
 
     private func showPanel() {
@@ -306,12 +317,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.panel = panel
         }
         defaults.set(true, forKey: "panelVisible")
+        panelItem?.state = .on
         panel?.show()
         startMonitoring()
     }
 
     private func panelDidClose() {
         defaults.set(false, forKey: "panelVisible")
+        panelItem?.state = .off
         for key in SectionKey.allCases {
             panelVisibleCounts[key] = Self.initialVisible(key)
         }

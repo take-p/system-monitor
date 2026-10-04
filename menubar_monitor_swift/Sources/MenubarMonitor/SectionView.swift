@@ -2,8 +2,6 @@ import AppKit
 
 /// メニューの1つの欄。高さ・描画・クリック時の処理をまとめて差し替える
 struct Section {
-    /// 見出しの名前(ピンのボタンを見出しの右に置くのに使う)
-    var title: String
     var height: CGFloat
     /// (幅, ホバー中のマウス位置 or nil)で中身を描く
     var draw: (CGFloat, NSPoint?) -> Void
@@ -15,17 +13,6 @@ struct Section {
 final class SectionView: NSView {
     private var section: Section?
     private var hoverPoint: NSPoint?
-    /// 設定すると、見出しの右にピンのボタンを出し、押されたら呼ぶ(メニューの一番上の欄で、パネルに固定表示する)
-    var onPin: (() -> Void)? {
-        didSet { needsDisplay = true }
-    }
-
-    /// ピンのボタンの範囲
-    private var pinRect: NSRect? {
-        guard onPin != nil, let title = section?.title else { return nil }
-        let x = Layout.padX + textWidth(title, Fonts.title()) + 4
-        return NSRect(x: x, y: Layout.padY, width: 24, height: 18)
-    }
 
     override var isFlipped: Bool { true }
 
@@ -61,24 +48,11 @@ final class SectionView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         // ビュー付きのメニュー項目はクリックしてもメニューが閉じず、イベントはビューに届く
-        let point = convert(event.locationInWindow, from: nil)
-        if let pinRect, pinRect.contains(point) {
-            onPin?()
-            return
-        }
-        section?.onClick?(point)
+        section?.onClick?(convert(event.locationInWindow, from: nil))
     }
 
     override func draw(_ dirtyRect: NSRect) {
         section?.draw(bounds.width, hoverPoint)
-        if let pinRect {
-            // 押せることが分かるよう、ホバー中だけ背景を薄く敷く
-            if let hoverPoint, pinRect.contains(hoverPoint) {
-                fillRect(pinRect.minX, pinRect.minY, pinRect.width, pinRect.height, .quaternaryLabelColor, radius: 4)
-            }
-            let iconWidth = symbolImage("pin", secondaryText())?.size.width ?? 0
-            drawSymbol("pin", pinRect.midX - iconWidth / 2, pinRect.minY, pinRect.height, secondaryText())
-        }
     }
 
     /// 欄の中身と高さを差し替えて再描画させる
