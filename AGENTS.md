@@ -13,19 +13,22 @@ Python 版(`menubar_monitor/`)は移植元として残しているだけで、�
 cd menubar_monitor_swift
 xcodegen generate
 xcodebuild -project MenubarMonitor.xcodeproj -scheme MenubarMonitor -configuration Release \
+  -derivedDataPath ~/Library/Developer/Xcode/DerivedData/MenubarMonitor.noindex \
   -destination 'platform=macOS,arch=arm64' build
 
 # 動いている版を終了してから置き換え、起動し直す。
 # dittoは既存のバンドルに上書きで混ぜるので、古い版のファイルが残らないよう先に消す
 pkill -x MenubarMonitor
 /bin/rm -rf /Applications/MenubarMonitor.app
-ditto ~/Library/Developer/Xcode/DerivedData/MenubarMonitor-*/Build/Products/Release/MenubarMonitor.app \
+ditto ~/Library/Developer/Xcode/DerivedData/MenubarMonitor.noindex/Build/Products/Release/MenubarMonitor.app \
   /Applications/MenubarMonitor.app
 codesign --verify --deep --strict /Applications/MenubarMonitor.app
 open /Applications/MenubarMonitor.app
 ```
 
-- ビルド先はデフォルトの DerivedData のままにする。Desktop 配下にビルドすると、Finder の拡張属性が付いて署名に失敗する
+- ビルド先は Debug・Release とも、確認用のビルドも含めて必ず `-derivedDataPath ~/Library/Developer/Xcode/DerivedData/MenubarMonitor.noindex` にする
+  - 名前が `.noindex` で終わるフォルダは Spotlight が調べないので、ビルドしたアプリがアプリの一覧に `/Applications` の版と並んで出ない
+  - Desktop 配下にビルドすると、Finder の拡張属性が付いて署名に失敗する
 - 署名はアドホック(`CODE_SIGN_IDENTITY: "-"`)。App Store での配信は保留中
 - `.xcodeproj` は生成物なのでコミットしない。ファイルを追加・削除したら `xcodegen generate` で作り直す
 
