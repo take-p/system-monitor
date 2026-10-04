@@ -13,6 +13,13 @@ struct Section {
 final class SectionView: NSView {
     private var section: Section?
     private var hoverPoint: NSPoint?
+    /// trueなら、押したままマウスを動かすとウィンドウごと動かす(パネルで使う。メニューでは動かさない)
+    var allowsWindowDrag = false
+    /// ドラッグの起点(押した時点のイベント)と、ドラッグに切り替えたかどうか
+    private var mouseDownEvent: NSEvent?
+    private var dragging = false
+    /// これ以上動いたらクリックではなくドラッグとみなす距離(pt)
+    private static let dragThreshold: CGFloat = 3
 
     override var isFlipped: Bool { true }
 
@@ -46,7 +53,40 @@ final class SectionView: NSView {
     // パネルはアクティブにならないので、最初のクリックからボタンや「さらに表示」に反応させる
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    // ウィンドウのドラッグはmouseDraggedで自前で始めるので、AppKitの背景ドラッグには任せない(クリックが届かなくなる)
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        // メニューでは押した時点の扱いをメニューに任せる(ここで止めるとメニューの操作が乱れる)
+        guard allowsWindowDrag else {
+            super.mouseDown(with: event)
+            return
+        }
+        mouseDownEvent = event
+        dragging = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard allowsWindowDrag else {
+            super.mouseDragged(with: event)
+            return
+        }
+        guard !dragging, let down = mouseDownEvent, let window else { return }
+        let dx = event.locationInWindow.x - down.locationInWindow.x
+        let dy = event.locationInWindow.y - down.locationInWindow.y
+        guard hypot(dx, dy) >= Self.dragThreshold else { return }
+        dragging = true
+        // 押した時点のイベントを渡すと、そこからウィンドウのドラッグが始まり、離すまでAppKitが追従させる
+        window.performDrag(with: down)
+    }
+
     override func mouseUp(with event: NSEvent) {
+        mouseDownEvent = nil
+        // ドラッグで動かしただけのときは、離した位置のボタンを押したことにしない
+        if dragging {
+            dragging = false
+            return
+        }
         // ビュー付きのメニュー項目はクリックしてもメニューが閉じず、イベントはビューに届く
         section?.onClick?(convert(event.locationInWindow, from: nil))
     }

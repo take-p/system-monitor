@@ -43,6 +43,8 @@ final class MonitorPanel: NSObject, NSWindowDelegate {
         // デスクトップ(操作スペース)を切り替えても、フルスクリーンのアプリの上でも出したままにする
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
+        // タイトルバーだけでなく、欄の間の隙間などの背景をドラッグしても動かせるようにする(欄の上はSectionViewが自前で動かす)
+        panel.isMovableByWindowBackground = true
 
         // 背景はメニューと同じすりガラス状にする
         let effect = NSVisualEffectView()
@@ -67,6 +69,7 @@ final class MonitorPanel: NSObject, NSWindowDelegate {
             container.addSubview(separator)
             separators[key] = separator
             let view = SectionView()
+            view.allowsWindowDrag = true
             container.addSubview(view)
             sectionViews[key] = view
         }
