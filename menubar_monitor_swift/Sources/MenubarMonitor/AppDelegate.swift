@@ -34,10 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let diskIO = DiskIOSampler()
     private let network = NetworkSampler()
     private let congestion = CongestionScanner()
-    private let cpuSampler = GroupRateSampler.cpu()
-    private let diskSampler = GroupRateSampler.disk()
-    private let netSampler = NetProcessSampler()
-    private let gpuSampler = GPUProcessSampler()
+    private let collector = ProcessCollector()
 
     // 直近の値
     private var cpuPercent: Double?
@@ -64,6 +61,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var gpuProcesses: [UsageEntry]?
     private var diskProcesses: [UsageEntry]?
     private var netProcesses: [UsageEntry]?
+    /// 集計中ならtrue(前回の集計が終わっていなければ次を飛ばし、処理が積み上がらないようにする)
+    private var collecting = false
+    /// メニューを閉じるたびに増やす。閉じる前に始めた集計の結果を、次に開いたメニューに出さないために使う
+    private var menuGeneration = 0
     /// 一覧に出している件数(メニューを閉じると初期件数に戻す)
     private var visibleCounts: [SectionKey: Int] = [:]
 
@@ -269,11 +270,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard menu === statusItem.menu else { return }
         menuOpen = false
         congestion.deactivate()
+        menuGeneration += 1
         // 次に開いたとき、閉じていた間の平均ではなく直近の使用率を出すため基準を捨てる
-        gpuSampler.reset()
-        cpuSampler.reset()
-        diskSampler.reset()
-        netSampler.reset()
+        collector.reset()
         gpuProcesses = nil
         cpuProcesses = nil
         diskProcesses = nil
@@ -331,15 +330,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.image = StatusImage.build(visible, height: barHeight, mode: displayMode)
     }
 
-    /// 全プロセスの走査はメニューを開いている間だけ行う(1回あたり数十ms)。
-    /// メモリ・CPU・ディスク・ネットワークのランキングは同じスナップショットから作る
+    /// アプリ別の集計はメニューを開いている間だけ、バックグラウンドで行う。結果が届いたら欄を描き直す
     private func refreshProcesses() {
-        let snapshot = ProcessSnapshot.take()
-        memoryGroups = snapshot.groupedMemory(total: MemoryInfo.total)
-        cpuProcesses = cpuSampler.sample(snapshot)?.map { UsageEntry(name: $0.name, value: $0.rate) }
-        diskProcesses = diskSampler.sample(snapshot)?.map { UsageEntry(name: $0.name, value: $0.rate) }
-        netProcesses = netSampler.sample(snapshot)?.map { UsageEntry(name: $0.name, value: $0.total, up: $0.up, down: $0.down) }
-        gpuProcesses = gpuSampler.sample(snapshot)?.map { UsageEntry(name: $0.name, value: $0.percent) }
+        guard !collecting else { return }
+        collecting = true
+        let generation = menuGeneration
+        collector.collect { [weak self] results in
+            guard let self else { return }
+            collecting = false
+            guard generation == menuGeneration else {
+                // 閉じる前に始めた集計だった。もう開き直していれば、改めて集計する
+                if menuOpen { refreshProcesses() }
+                return
+            }
+            // メモリの一覧は閉じても残し、次に開いたときに前回の一覧を出して欄の高さの変化を抑える
+            memoryGroups = results.memory
+            cpuProcesses = results.cpu
+            gpuProcesses = results.gpu
+            diskProcesses = results.disk
+            netProcesses = results.net
+            if menuOpen { refreshSections() }
+        }
     }
 
     private func actions(_ key: SectionKey) -> PagerActions {
