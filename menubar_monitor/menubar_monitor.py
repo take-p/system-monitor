@@ -41,12 +41,13 @@ import menu_views
 import process_rates
 from disk_info import DiskIOSampler
 from gpu_info import GpuProcessSampler
+from net_processes import NetProcessSampler
 from memory_info import collect_grouped, compute_breakdown, get_vm_stat_counts, snapshot_grouped_processes
 from menu_views import value_color
 from network_info import NetworkSampler
 from wifi_congestion import CongestionScanner
 
-UPDATE_INTERVAL = 2.0
+UPDATE_INTERVAL = menu_views.HISTORY_STEP  # 推移グラフの記録間隔と同じにする
 
 LABEL_FONT_SIZE = 7
 VALUE_FONT_SIZE = 12
@@ -68,6 +69,11 @@ NET_DIGITS = 4
 PERCENT_DIGITS = 3      # 使用率も百の位まで同様に0埋めする
 
 DISPLAY_MODES = {"number": "数値", "pie": "円グラフ", "donut": "ドーナツグラフ", "bar": "縦棒グラフ"}
+# メニューの欄とメニューバーの項目の対応。並びはメニューバーと同じCPU/RAM/GPU/SSD/NETの順
+SECTIONS = (("cpu", "CPU", "CPU"), ("memory", "Memory", "RAM"), ("gpu", "GPU", "GPU"),
+            ("storage", "Storage", "SSD"), ("network", "Network", "NET"))  # (キー, メニューの名前, メニューバーのラベル)
+HISTORY_MINUTES = (1, 2, 5, 10)  # メニューの「履歴の長さ」で選べる長さ(分)。最長はmenu_views.MAX_HISTORYに合わせる
+DEFAULT_HISTORY_MINUTES = 2
 DEFAULTS_SUITE = "local.system-monitor.menubar"
 
 def get_cpu_percent():
@@ -348,7 +354,10 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         self.disk_processes = None
         self.disk_visible = menu_views.TOP_DISK_PROCESSES
         self.disk_sampler = process_rates.disk_sampler()
-        # メモリのランキングに出している件数(メニューを閉じても保持)
+        self.net_processes = None
+        self.net_visible = menu_views.TOP_NET_PROCESSES
+        self.net_sampler = NetProcessSampler()
+        # メモリのランキングに出している件数(メニューを閉じると初期件数に戻す)
         self.memory_visible = menu_views.COLLAPSED_PROCESSES
         self.gpu_processes = None
         self.gpu_visible = menu_views.TOP_GPU_PROCESSES
@@ -356,43 +365,65 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
 
         # 推移グラフ用の履歴。メニューを閉じている間も記録し続ける
         core_count = psutil.cpu_count(logical=True)
-        self.core_histories = [deque(maxlen=menu_views.HISTORY) for _ in range(core_count)]
+        self.core_histories = [deque(maxlen=menu_views.MAX_HISTORY) for _ in range(core_count)]
         # メニューでは高性能コア(P)を上、高効率コア(E)を下に並べる(sortedは安定なので各種類内は番号順)
         self.core_rows = sorted(zip(get_core_labels(core_count), self.core_histories),
                                 key=lambda row: not row[0].startswith("P"))
-        self.gpu_history = deque(maxlen=menu_views.HISTORY)
-        self.dl_history = deque(maxlen=menu_views.HISTORY)
-        self.ul_history = deque(maxlen=menu_views.HISTORY)
-        self.disk_busy_history = deque(maxlen=menu_views.HISTORY)
+        self.gpu_history = deque(maxlen=menu_views.MAX_HISTORY)
+        self.dl_history = deque(maxlen=menu_views.MAX_HISTORY)
+        self.ul_history = deque(maxlen=menu_views.MAX_HISTORY)
+        self.disk_busy_history = deque(maxlen=menu_views.MAX_HISTORY)
 
         # python本体(org.python.python)のドメインを汚さないよう、専用のsuiteに保存する
         self.defaults = NSUserDefaults.alloc().initWithSuiteName_(DEFAULTS_SUITE)
         self.display_mode = self.defaults.stringForKey_("displayMode")
         if self.display_mode not in DISPLAY_MODES:
             self.display_mode = "number"
+        self.history_minutes = self.defaults.integerForKey_("historyMinutes")
+        if self.history_minutes not in HISTORY_MINUTES:
+            self.history_minutes = DEFAULT_HISTORY_MINUTES
+        menu_views.set_history_minutes(self.history_minutes)
+        # 非表示にした項目(メニューバーの項目とメニュー内の欄の両方を隠す)
+        self.hidden_sections = {str(key) for key in (self.defaults.arrayForKey_("hiddenSections") or [])}
+        if len(self.hidden_sections & {key for key, _, _ in SECTIONS}) >= len(SECTIONS):
+            self.hidden_sections = set()  # 全部隠れているとメニューを開けなくなるので戻す
 
         menu = NSMenu.alloc().init()
         menu.setDelegate_(self)
-        # 並びはメニューバーと同じCPU/RAM/GPU/SSD/NETの順にする
         self.sections = {}
-        for i, key in enumerate(("cpu", "memory", "gpu", "storage", "network")):
-            if i:
-                menu.addItem_(NSMenuItem.separatorItem())
+        self.section_items = {}
+        self.section_separators = {}  # 各欄の上に置く区切り線(一番上に見えている欄では隠す)
+        for key, _, _ in SECTIONS:
+            separator = NSMenuItem.separatorItem()
+            menu.addItem_(separator)
+            self.section_separators[key] = separator
             view = menu_views.make_section_view(1)
             item = NSMenuItem.alloc().init()
             item.setView_(view)
             menu.addItem_(item)
             self.sections[key] = view
+            self.section_items[key] = item
         menu.addItem_(NSMenuItem.separatorItem())
-        menu.addItem_(NSMenuItem.sectionHeaderWithTitle_("表示"))
-        self.mode_items = {}
-        for mode, title in DISPLAY_MODES.items():
-            item = menu.addItemWithTitle_action_keyEquivalent_(title, "changeDisplayMode:", "")
+        # 表示する項目の切り替えは、メニューが長くならないようサブメニューにまとめる
+        sections_menu = NSMenu.alloc().init()
+        # 最後の1つを外せなくするのにsetEnabled_を使うので、自動での有効化を切る
+        sections_menu.setAutoenablesItems_(False)
+        self.visibility_items = {}
+        for key, title, _ in SECTIONS:
+            item = sections_menu.addItemWithTitle_action_keyEquivalent_(title, "toggleSection:", "")
             item.setTarget_(self)
-            item.setRepresentedObject_(mode)
-            item.setIndentationLevel_(1)
-            self.mode_items[mode] = item
+            item.setRepresentedObject_(key)
+            self.visibility_items[key] = item
+        sections_item = menu.addItemWithTitle_action_keyEquivalent_("表示項目", None, "")
+        menu.setSubmenu_forItem_(sections_menu, sections_item)
+        self._apply_section_visibility()
+        # 表示形式と履歴の長さも、メニューが長くならないようサブメニューにする
+        self.mode_items = self._add_choice_submenu(
+            menu, "表示形式", DISPLAY_MODES.items(), "changeDisplayMode:")
         self._sync_mode_checkmarks()
+        self.history_items = self._add_choice_submenu(
+            menu, "履歴の長さ", ((minutes, f"{minutes}分") for minutes in HISTORY_MINUTES), "changeHistoryLength:")
+        self._sync_history_checkmarks()
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItemWithTitle_action_keyEquivalent_("Quit", "terminate:", "q")
         self.status_item.setMenu_(menu)
@@ -414,10 +445,46 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
             item.setState_(NSControlStateValueOn if mode == self.display_mode else NSControlStateValueOff)
 
     @objc.python_method
+    def _add_choice_submenu(self, menu, title, choices, action):
+        """choices: [(値, 項目名)] から選択肢のサブメニューを作ってmenuに足し、{値: 項目} を返す"""
+        submenu = NSMenu.alloc().init()
+        items = {}
+        for value, label in choices:
+            item = submenu.addItemWithTitle_action_keyEquivalent_(label, action, "")
+            item.setTarget_(self)
+            item.setRepresentedObject_(value)
+            items[value] = item
+        parent = menu.addItemWithTitle_action_keyEquivalent_(title, None, "")
+        menu.setSubmenu_forItem_(submenu, parent)
+        return items
+
+    @objc.python_method
+    def _apply_section_visibility(self):
+        """非表示の設定を、メニュー内の欄・区切り線・サブメニューのチェックに反映する"""
+        first = True
+        for key, _, _ in SECTIONS:
+            hidden = key in self.hidden_sections
+            self.section_items[key].setHidden_(hidden)
+            self.section_separators[key].setHidden_(hidden or first)
+            first = first and hidden
+            item = self.visibility_items[key]
+            item.setState_(NSControlStateValueOff if hidden else NSControlStateValueOn)
+        # 最後の1つまで隠すとメニューバーのアイコンが消えてメニューを開けなくなるので、外せないようにする
+        visible = [key for key, _, _ in SECTIONS if key not in self.hidden_sections]
+        for key, item in self.visibility_items.items():
+            item.setEnabled_(not (len(visible) == 1 and key in visible))
+
+    @objc.python_method
+    def _sync_history_checkmarks(self):
+        for minutes, item in self.history_items.items():
+            item.setState_(NSControlStateValueOn if minutes == self.history_minutes else NSControlStateValueOff)
+
+    @objc.python_method
     def _render(self):
-        self.status_item.button().setImage_(
-            build_status_image(self.segments, self.bar_height, self.display_mode)
-        )
+        # 非表示にした項目はメニューバーからも外す
+        hidden_labels = {label for key, _, label in SECTIONS if key in self.hidden_sections}
+        segments = [segment for segment in self.segments if segment[0] not in hidden_labels]
+        self.status_item.button().setImage_(build_status_image(segments, self.bar_height, self.display_mode))
 
     @objc.python_method
     def _refresh_processes(self):
@@ -440,6 +507,10 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         except Exception:
             self.disk_processes = None
         try:
+            self.net_processes = self.net_sampler.sample(snapshot) if snapshot else None
+        except Exception:
+            self.net_processes = None
+        try:
             self.gpu_processes = self.gpu_sampler.sample()
         except Exception:
             self.gpu_processes = None
@@ -459,7 +530,8 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
                 self.disk_processes, self.disk_visible, self._show_more_disk, self._collapse_disk,
             ),
             "network": menu_views.network_section(
-                self.latest["network"], self.dl_history, self.ul_history, self._congestion_snapshot()
+                self.latest["network"], self.dl_history, self.ul_history, self._congestion_snapshot(),
+                self.net_processes, self.net_visible, self._show_more_net, self._collapse_net,
             ),
         }
         for key, (height, drawer, *on_click) in sections.items():
@@ -497,6 +569,16 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         self._refresh_sections()
 
     @objc.python_method
+    def _show_more_net(self, visible):
+        self.net_visible = visible
+        self._refresh_sections()
+
+    @objc.python_method
+    def _collapse_net(self):
+        self.net_visible = menu_views.TOP_NET_PROCESSES
+        self._refresh_sections()
+
+    @objc.python_method
     def _show_more_gpu(self, visible):
         self.gpu_visible = visible
         self._refresh_sections()
@@ -530,6 +612,14 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         self.cpu_processes = None
         self.disk_sampler.reset()
         self.disk_processes = None
+        self.net_sampler.reset()
+        self.net_processes = None
+        # 「さらに表示」で広げた一覧は、次に開いたときは初期件数に戻しておく
+        self.cpu_visible = menu_views.COLLAPSED_PROCESSES
+        self.memory_visible = menu_views.COLLAPSED_PROCESSES
+        self.gpu_visible = menu_views.TOP_GPU_PROCESSES
+        self.disk_visible = menu_views.TOP_DISK_PROCESSES
+        self.net_visible = menu_views.TOP_NET_PROCESSES
 
     def changeDisplayMode_(self, sender):
         self.display_mode = str(sender.representedObject())
@@ -537,6 +627,22 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         self._sync_mode_checkmarks()
         # 次のタイマーを待たず、直近の値のまま描き直す
         self._render()
+
+    def toggleSection_(self, sender):
+        key = str(sender.representedObject())
+        self.hidden_sections ^= {key}
+        self.defaults.setObject_forKey_(sorted(self.hidden_sections), "hiddenSections")
+        self._apply_section_visibility()
+        self._render()
+
+    def changeHistoryLength_(self, sender):
+        self.history_minutes = int(sender.representedObject())
+        self.defaults.setInteger_forKey_(self.history_minutes, "historyMinutes")
+        self._sync_history_checkmarks()
+        # 記録は最長分を取ってあるので、表示する長さを変えるだけで過去の分もすぐ出る
+        menu_views.set_history_minutes(self.history_minutes)
+        if self.menu_open:
+            self._refresh_sections()
 
     def update_(self, _timer):
         # 取得に失敗しても例外でアプリごと落とさず、その項目だけ「--」表示にする
@@ -575,7 +681,7 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
             ("RAM", mem and mem["percent"], value_color(mem["percent"]) if mem else None),
             ("GPU", gpu, value_color(gpu) if gpu is not None else None),
             # SSDは容量(ほとんど変わらない)ではなく、今の混み具合が分かるビジー率を出す。容量はメニュー内に出す
-            # 右に残り容量(パージ可能領域を含む。Finderと同じ)を「Free / 0142GB」の2段で添える
+            # 右に残り容量(パージ可能領域を含む。Finderと同じ)を「Free / 142GB」の2段で添える
             ("SSD", disk_io and disk_io["busy"], value_color(disk_io["busy"]) if disk_io else None,
              format_free_lines(storage and storage["available"])),
             ("NET", [format_rate_line("↑", net["ul"]), format_rate_line("↓", net["dl"])] if net else None, None),

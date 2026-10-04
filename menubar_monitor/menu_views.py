@@ -41,14 +41,28 @@ CONGESTION_ROW_HEIGHT = 17
 BAR_HEIGHT = 8
 CHART_HEIGHT = 30        # GPUの推移グラフの高さ(pt)
 
-HISTORY = 60          # 推移グラフの点数(2秒間隔で2分)
+HISTORY_STEP = 2.0    # 推移の記録間隔(秒)。menubar_monitorの更新間隔と同じ
+MAX_HISTORY = 300     # 記録しておく最大の点数(10分)。表示する長さはメニューの「履歴の長さ」で選ぶ
+HISTORY = 60          # 表示する点数(set_history_minutesで変わる。既定は2分)
+HISTORY_LABEL = "2分前"
+
+def set_history_minutes(minutes):
+    """推移グラフに表示する長さを分で指定する"""
+    global HISTORY, HISTORY_LABEL
+    HISTORY = min(int(minutes * 60 / HISTORY_STEP), MAX_HISTORY)
+    HISTORY_LABEL = f"{minutes}分前"
+
+def recent(history):
+    """記録(古い順)のうち、表示する長さ分の直近の点だけを返す"""
+    return list(history)[-HISTORY:]
 HEAT_CELL_HEIGHT = 6     # CPUヒートマップ1行の高さ(pt)。コア数ぶん並ぶので細めにする
 HEAT_ROW_GAP = 2
 COLLAPSED_PROCESSES = 3   # CPU・メモリのランキングを折りたたんだときの件数
-PROCESS_PAGE = 5          # 「さらに表示」1回で増やす件数
+PROCESS_PAGE = 10         # 「さらに表示」1回で増やす件数
 COLLAPSE_ZONE_WIDTH = 100 # ランキング末尾の行で「折りたたむ」として扱う右端の幅(pt)
 TOP_GPU_PROCESSES = 1     # GPUのランキングを折りたたんだときの件数
 TOP_DISK_PROCESSES = 1    # ディスク読み書きのランキングを折りたたんだときの件数
+TOP_NET_PROCESSES = 1     # 通信量のランキングを折りたたんだときの件数
 MIN_SCALE_MBPS = 1.0
 
 GB = 1024 ** 3
@@ -254,13 +268,13 @@ def heat_color(percent):
 PERCENT_CHART_HEIGHT = CHART_HEIGHT + SMALL_ROW_HEIGHT + 1  # draw_percent_chart 1つ分の高さ
 
 def draw_percent_chart(x, y, width, history, color):
-    """縦軸0〜100%固定の推移グラフと、その下の「2分前 / 現在」の行。GPUの使用率・ディスクのビジー率で共用する。
+    """縦軸0〜100%固定の推移グラフと、その下の「◯分前 / 現在」の行。GPUの使用率・ディスクのビジー率で共用する。
     上端に100%の目盛り線を薄く引き、ほかのグラフと同じく左上に目盛りの値を添える"""
     fill_rect(x, y, width, 0.5, NSColor.tertiaryLabelColor())
-    draw_history_chart(x, y, width, CHART_HEIGHT, list(history), 100, color)
+    draw_history_chart(x, y, width, CHART_HEIGHT, recent(history), 100, color)
     draw_text("100%", x + 3, y + 1, mono_small_font(), NSColor.tertiaryLabelColor())
     footer_y = y + CHART_HEIGHT + 1
-    draw_text("2分前", x, footer_y, small_font(), NSColor.tertiaryLabelColor())
+    draw_text(HISTORY_LABEL, x, footer_y, small_font(), NSColor.tertiaryLabelColor())
     draw_text_right("現在", x + width, footer_y, small_font(), NSColor.tertiaryLabelColor())
 
 MIRROR_HALF_HEIGHT = 24  # 上下対称グラフの片側の高さ(pt)
@@ -275,7 +289,7 @@ def draw_mirror_chart(x, y, width, unit, top, bottom):
     chart_y = y + SMALL_ROW_HEIGHT
     middle = chart_y + MIRROR_HALF_HEIGHT
     for (label, value, peak, total_text, history, color, note), downward in ((top, False), (bottom, True)):
-        values = list(history)
+        values = recent(history)
         # 表示中の最大値に合わせて縦軸を自動伸縮する
         scale = nice_ceil(max(values) if values else 0)
         header_y = middle + MIRROR_HALF_HEIGHT if downward else y
@@ -360,6 +374,12 @@ def set_section(view, height, drawer, on_click=None):
     view.on_click = on_click
     if view.frame().size.height != height:
         view.setFrameSize_((MENU_WIDTH, height))
+        # メニューを開いている間に高さが変わっても、NSMenuはほかの項目を並べ直さない(itemChanged_でも同じ)。
+        # そのままだと広がった欄が上下の欄に重なって描かれるので、ビューを付け直して配置を計算し直させる
+        item = view.enclosingMenuItem()
+        if item is not None:
+            item.setView_(None)
+            item.setView_(view)
     view.setNeedsDisplay_(True)
 
 # ---------------------------------------------------------------------------
@@ -396,13 +416,15 @@ def cpu_section(percent, core_rows, processes=None, visible=COLLAPSED_PROCESSES,
                             NSColor.secondaryLabelColor())
             fill_rect(grid_x, row_y, grid_w, HEAT_CELL_HEIGHT,
                       NSColor.quaternaryLabelColor().colorWithAlphaComponent_(0.25))
+            history = recent(history)
             start = HISTORY - len(history)
             for i, value in enumerate(history):
-                # セル間に0.5ptの隙間を空けて、時間の区切りが見えるようにする
-                fill_rect(grid_x + (start + i) * cell_w, row_y, max(cell_w - 0.5, 0.5),
+                # セル間に0.5ptの隙間を空けて、時間の区切りが見えるようにする。
+                # 履歴が長くセルが細いと隙間ばかりになるので、そのときは隙間を空けない
+                fill_rect(grid_x + (start + i) * cell_w, row_y, cell_w - 0.5 if cell_w >= 3 else cell_w + 0.2,
                           HEAT_CELL_HEIGHT, heat_color(value))
         footer_y = y + heat_height + 1
-        draw_text("2分前", grid_x, footer_y, small_font(), NSColor.tertiaryLabelColor())
+        draw_text(HISTORY_LABEL, grid_x, footer_y, small_font(), NSColor.tertiaryLabelColor())
         draw_text_right("現在", width - PAD_X, footer_y, small_font(), NSColor.tertiaryLabelColor())
 
         # CPUを使っているアプリの上位(CPU全体=100%)
@@ -463,7 +485,10 @@ class PagerRow:
         if self.remaining:
             end = draw_symbol("chevron.down", PAD_X, self.y, ROW_HEIGHT, secondary)
             end = draw_text(f"さらに{min(self.remaining, PROCESS_PAGE)}件表示", end + 4, self.y, font, secondary)
-            draw_text(f"  {self.rest_note}", end, self.y + 2, small_font(), NSColor.tertiaryLabelColor())
+            # 補足が長い(上り/下りの値など)と右端の「折りたたむ」に重なるので、収まらなければ末尾を省略する
+            note_right = self.collapse_x - 4 if self.can_collapse else width - PAD_X
+            draw_text_fit(f"  {self.rest_note}", end, self.y + 2, note_right - end, small_font(),
+                          NSColor.tertiaryLabelColor())
         elif note:
             draw_text(self.empty_note, PAD_X, self.y, font, NSColor.tertiaryLabelColor())
         if self.can_collapse:
@@ -474,26 +499,28 @@ class PagerRow:
 
 class UsageTable:
     """「Process (grouped)」の見出し、アプリごとの使用率(名前・バー・%)、末尾の「さらに表示」の行からなる表。
-    processes: [(アプリ名, 値)](None=集計中)。値は既定では使用率(全体=100%)で、
+    processes: [(アプリ名, 値, ...)](None=集計中)。値は並び順とバーに使い、既定では使用率(全体=100%)で、
     上位同士の比較ではなく全体に対する割合が分かるようバーも100%基準で描く。
     行数は数秒ごとに増減するので、表示件数(初期件数または「さらに表示」で広げた件数)分と末尾の行の高さは
     常に確保し、アプリが足りない行は空けてメニューの揺れを抑える。
     「さらに表示」を出す必要がないときは、末尾の行に「ほかのアプリはありません」と出す"""
 
     def __init__(self, y, processes, visible, collapsed, value_header, color, empty_text,
-                 format_value="{:.1f}%".format, bar_max=100):
-        """format_value: 値を表示文字列にする関数、bar_max: バーが満杯になる値(Noneなら1位の値)"""
+                 format_value="{:.1f}%".format, bar_max=100, format_entry=None, format_rest=None):
+        """format_value: 値を表示文字列にする関数、bar_max: バーが満杯になる値(Noneなら1位の値)、
+        format_entry: 行(タプル全体)から表示文字列を作る関数(上り/下りのように値を複数出すとき)、
+        format_rest: 一覧に出ていない残りの行から、末尾の行の補足を作る関数"""
         self.y = y
         self.processes = processes
         self.shown = (processes or [])[:visible]
         remaining = (processes or [])[visible:]
         self.value_header, self.color, self.empty_text = value_header, color, empty_text
-        self.format_value = format_value
-        self.bar_max = bar_max if bar_max is not None else max((v for _, v in processes or []), default=0)
+        self.format_entry = format_entry or (lambda entry: format_value(entry[1]))
+        self.bar_max = bar_max if bar_max is not None else max((e[1] for e in processes or []), default=0)
+        rest_text = format_rest(remaining) if format_rest else format_value(sum(e[1] for e in remaining))
         rows = max(visible, collapsed)
         self.pager = PagerRow(y + SMALL_ROW_HEIGHT + ROW_HEIGHT * rows, len(self.shown),
-                              len(remaining), collapsed,
-                              f"残り {len(remaining)}アプリ · {format_value(sum(v for _, v in remaining))}", visible)
+                              len(remaining), collapsed, f"残り {len(remaining)}アプリ · {rest_text}", visible)
         self.height = SMALL_ROW_HEIGHT + ROW_HEIGHT * (rows + 1)
 
     def click(self, point, on_more, on_collapse):
@@ -506,7 +533,7 @@ class UsageTable:
         font = body_font()
         mono = NSFont.monospacedDigitSystemFontOfSize_weight_(font.pointSize(), NSFontWeightRegular)
         # 値の欄は「959 KB/s」のような長い値でもバーに重ならないよう、表示中の値の幅に合わせる
-        value_w = max([attributed(self.format_value(v), mono).size().width for _, v in self.shown] + [40])
+        value_w = max([attributed(self.format_entry(e), mono).size().width for e in self.shown] + [40])
         bar_len = value_right - value_w - 10 - bar_x
         secondary = NSColor.secondaryLabelColor()
         draw_text("Process (grouped)", PAD_X, self.y, small_font(), secondary)
@@ -518,10 +545,13 @@ class UsageTable:
             # 展開中なら「折りたたむ」だけは出す
             self.pager.draw(width, hover, note=False)
             return
-        for name, value in self.shown:
+        for entry in self.shown:
+            name, value = entry[0], entry[1]
             draw_text_fit(name, PAD_X, row_y, name_w, font)
-            draw_bar(bar_x, row_y + 5, bar_len, min(value / self.bar_max, 1) if self.bar_max else 0, self.color, h=6)
-            draw_text_right(self.format_value(value), value_right, row_y, mono)
+            # 値の文字列が長い(上り/下りなど)とバーの幅が取れないので、狭すぎるときは描かない
+            if bar_len >= 20:
+                draw_bar(bar_x, row_y + 5, bar_len, min(value / self.bar_max, 1) if self.bar_max else 0, self.color, h=6)
+            draw_text_right(self.format_entry(entry), value_right, row_y, mono)
             row_y += ROW_HEIGHT
         self.pager.draw(width, hover, show_empty=True)
 
@@ -686,9 +716,15 @@ def storage_section(storage, disk_io=None, busy_history=(),
 
     return height, draw, on_click
 
-def network_section(net, dl_history, ul_history, congestion=None):
+def format_mbps(mbps):
+    # 小さい値が「0.0」ばかりにならないよう、1Mbps未満は小数2桁にする
+    return f"{mbps:.2f}" if mbps < 1 else f"{mbps:.1f}"
+
+def network_section(net, dl_history, ul_history, congestion=None,
+                    processes=None, visible=TOP_NET_PROCESSES, on_more=None, on_collapse=None):
     """net: NetworkSampler.sample()の戻り値(None=取得失敗)、
-    congestion: CongestionScanner.snapshot()の戻り値(Wi-Fi以外・未接続ならNone)"""
+    congestion: CongestionScanner.snapshot()の戻り値(Wi-Fi以外・未接続ならNone)、
+    processes: NetProcessSampler.sample()の結果(None=集計中)。欄の末尾にアプリ別の上り/下りの表を置く"""
     if net:
         spec_row, quality_row = (net["details"] + [[], []])[:2]
         ratings = {label: rating for label, _, rating in quality_row if rating}
@@ -701,8 +737,20 @@ def network_section(net, dl_history, ul_history, congestion=None):
     # 規格と帯域は1行にまとめる
     text_rows = 1 + bool(spec_row) + bool(signal_rating)
     congestion_block = congestion_height(congestion)
-    height = (PAD_Y + TITLE_HEIGHT + ROW_HEIGHT * text_rows + congestion_block + 4
-              + MIRROR_CHART_HEIGHT + PAD_Y)
+    # バーは回線全体(グラフのUpload+Download)に占める割合。計測のずれでアプリが全体を上回ることがあるので1位も下限にする
+    line_total = (net["ul"] + net["dl"]) if net else 0
+    top = processes[0][1] if processes else 0
+    # アプリ別の表は、接続の詳細(電波・リンク・規格・混雑度)の下、欄の末尾に置く
+    table_y = PAD_Y + TITLE_HEIGHT + MIRROR_CHART_HEIGHT + 4 + ROW_HEIGHT * text_rows + congestion_block + 4
+    table = UsageTable(table_y, processes, visible, TOP_NET_PROCESSES, "↑ / ↓",
+                       NSColor.systemBlueColor(), "通信しているアプリはありません", bar_max=max(line_total, top),
+                       format_entry=lambda e: f"{format_mbps(e[2])} / {format_mbps(e[3])} Mbps",
+                       format_rest=lambda rest: f"{format_mbps(sum(e[2] for e in rest))} / "
+                                                f"{format_mbps(sum(e[3] for e in rest))} Mbps")
+    height = table.y + table.height + PAD_Y
+
+    def on_click(point):
+        table.click(point, on_more, on_collapse)
 
     def draw(width, hover=None):
         if net is None:
@@ -799,7 +847,10 @@ def network_section(net, dl_history, ul_history, congestion=None):
             draw_congestion(congestion, PAD_X, y, width, label_w, hover)
             y += congestion_height(congestion)
 
-    return height, draw
+        # 通信しているアプリの上位(上り/下り)
+        table.draw(width, hover)
+
+    return height, draw, on_click
 
 def congestion_height(congestion):
     if not congestion:
