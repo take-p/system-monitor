@@ -544,7 +544,7 @@ private func congestionHeight(_ congestion: CongestionSnapshot?) -> CGFloat {
 
 /// 全帯域のチャネル別混雑度を、帯域ごとに色付きセルの1列(ヒートマップ風)で描く。
 /// セルの大きさは全帯域でそろえ、接続中のチャネル群は枠で囲む。
-/// 右端は接続中の帯域なら接続中の混雑度、それ以外はその帯域で最も空いているチャネルを出す
+/// 右端にはどの帯域もその帯域で最も空いているチャネルを出し、接続中の混雑度は下の補足の行の先頭に出す
 private func drawCongestion(_ congestion: CongestionSnapshot, _ x: CGFloat, _ y: CGFloat, _ width: CGFloat,
                             _ labelWidth: CGFloat, _ hover: NSPoint?) {
     let font = Fonts.body()
@@ -591,14 +591,8 @@ private func drawCongestion(_ congestion: CongestionSnapshot, _ x: CGFloat, _ y:
             frame.stroke()
         }
 
-        if isCurrent {
-            let percent = congestion.currentPercent ?? 0
-            drawPartsRight([TextPart(String(format: "%.0f%% ", percent)), TextPart(congestionRating(percent).label, bold: true)],
-                           width - padX, rowY, font)
-        } else {
-            drawTextRight(String(format: "空き ch %d (%.0f%%)", band.best.number, band.best.percent), width - padX, rowY + 2,
-                          Fonts.small(), secondary)
-        }
+        drawTextRight(String(format: "空き ch %d (%.0f%%)", band.best.number, band.best.percent), width - padX, rowY + 2,
+                      Fonts.small(), secondary)
     }
 
     let noteY = y + CGFloat(bands.count) * Layout.congestionRowHeight
@@ -614,7 +608,12 @@ private func drawCongestion(_ congestion: CongestionSnapshot, _ x: CGFloat, _ y:
                   x + labelWidth, noteY, Fonts.small())
         return
     }
-    // 通常時は、スキャン結果がいつのものかだけを出す(接続中のチャネルは枠と「接続」の行で分かる)
+    // 通常時は、接続中の混雑度と、スキャン結果がいつのものかを出す(接続中のチャネルは枠と「接続」の行で分かる)
+    var parts: [TextPart] = []
+    if let percent = congestion.currentPercent {
+        parts += [TextPart(String(format: "%.0f%% ", percent)), TextPart(congestionRating(percent).label, bold: true),
+                  TextPart("  ")]
+    }
     let note = congestion.scanning ? "スキャン中" : congestion.age.map { String(format: "%.0f秒前の推定値", $0) } ?? ""
-    drawText(note, x + labelWidth, noteY, Fonts.small(), secondary)
+    drawParts(parts + [TextPart(note, secondary)], x + labelWidth, noteY, Fonts.small())
 }
