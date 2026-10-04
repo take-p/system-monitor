@@ -39,10 +39,10 @@ ROW_HEIGHT = 18       # 本文1行の高さ(pt)
 SMALL_ROW_HEIGHT = 15
 CONGESTION_ROW_HEIGHT = 17
 BAR_HEIGHT = 8
-CHART_HEIGHT = 40
+CHART_HEIGHT = 30        # GPUの推移グラフの高さ(pt)
 
 HISTORY = 60          # 推移グラフの点数(2秒間隔で2分)
-HEAT_CELL_HEIGHT = 8
+HEAT_CELL_HEIGHT = 6     # CPUヒートマップ1行の高さ(pt)。コア数ぶん並ぶので細めにする
 HEAT_ROW_GAP = 2
 COLLAPSED_PROCESSES = 3   # CPU・メモリのランキングを折りたたんだときの件数
 PROCESS_PAGE = 5          # 「さらに表示」1回で増やす件数
@@ -358,7 +358,7 @@ def cpu_section(percent, core_rows, processes=None, visible=COLLAPSED_PROCESSES,
 
     def draw(width, hover=None):
         draw_title(width, PAD_Y, "CPU", percent_parts(percent))
-        label_font = mono_small_font(8)
+        label_font = mono_small_font(7)
         label_offset = (HEAT_CELL_HEIGHT - label_font.ascender() + label_font.descender()) / 2
         # ラベル欄は一番長いラベルの幅に合わせる
         label_w = max((attributed(label, label_font).size().width for label, _ in core_rows), default=0)
@@ -670,7 +670,8 @@ def network_section(net, dl_history, ul_history, congestion=None):
     else:
         spec_row, quality_row, signal_rating = [], [], None
     # Link + 規格 + 電波
-    text_rows = 1 + len(spec_row) + bool(signal_rating)
+    # 規格と帯域は1行にまとめる
+    text_rows = 1 + bool(spec_row) + bool(signal_rating)
     congestion_block = congestion_height(congestion)
     height = (PAD_Y + TITLE_HEIGHT + ROW_HEIGHT * text_rows + congestion_block + 4
               + MIRROR_CHART_HEIGHT + PAD_Y)
@@ -755,9 +756,15 @@ def network_section(net, dl_history, ul_history, congestion=None):
             draw_text(f"{link:.0f} Mbps" if link else "N/A", PAD_X + label_w, y, font)
         y += ROW_HEIGHT
 
-        # 規格・帯域(1項目1行)
-        for label, value, _rating in spec_row:
-            draw_parts([(f"{label}: ", secondary), (value, None)], PAD_X, y, font)
+        # 規格・帯域(1行にまとめる)
+        if spec_row:
+            # ラベル付きで収まればそのまま、収まらなければラベルを省いて「 · 」でつなぐ
+            parts = []
+            for i, (label, value, _rating) in enumerate(spec_row):
+                parts += [(("   " if i else "") + f"{label}: ", secondary), (value, None)]
+            if sum(attributed(text, font).size().width for text, _ in parts) > width - PAD_X * 2:
+                parts = [(" · ".join(value for _, value, _ in spec_row), None)]
+            draw_parts(parts, PAD_X, y, font)
             y += ROW_HEIGHT
 
         if congestion:
