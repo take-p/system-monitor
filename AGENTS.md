@@ -29,6 +29,20 @@ open /Applications/MenubarMonitor.app
 - 署名はアドホック(`CODE_SIGN_IDENTITY: "-"`)。App Store での配信は保留中
 - `.xcodeproj` は生成物なのでコミットしない。ファイルを追加・削除したら `xcodegen generate` で作り直す
 
+### アプリアイコン
+
+アイコンは `menubar_monitor_swift/Tools/draw_icon.swift` でコードから描いている。デザインを変えたら描き直して各サイズを置き換える。
+
+```sh
+cd menubar_monitor_swift
+swift Tools/draw_icon.swift /tmp/icon_1024.png
+D=Sources/MenubarMonitor/Assets.xcassets/AppIcon.appiconset
+for s in 16 32 128 256 512; do
+  sips -z $s $s /tmp/icon_1024.png --out $D/icon_${s}x${s}.png
+  sips -z $((s*2)) $((s*2)) /tmp/icon_1024.png --out $D/icon_${s}x${s}@2x.png
+done
+```
+
 ### 確認用のオプション
 
 - `MenubarMonitor --dump`: 取得した値を一度出力して終了する(Python 版との突き合わせ用)
