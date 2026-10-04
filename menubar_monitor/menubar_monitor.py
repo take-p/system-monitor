@@ -117,23 +117,13 @@ def get_storage_usage():
     # Finder/システム設定と同じく、パージ可能領域を空きに含めた「重要な用途に使える空き容量」で計算する。
     # NSURLはリソース値をキャッシュするため、毎回新しく作る
     url = NSURL.fileURLWithPath_("/")
-    keys = ["NSURLVolumeTotalCapacityKey", "NSURLVolumeAvailableCapacityForImportantUsageKey",
-            "NSURLVolumeAvailableCapacityKey"]
+    keys = ["NSURLVolumeTotalCapacityKey", "NSURLVolumeAvailableCapacityForImportantUsageKey"]
     values, error = url.resourceValuesForKeys_error_(keys, None)
     if values is None:
         raise OSError(str(error))
-    total = int(values["NSURLVolumeTotalCapacityKey"])
-    available = int(values["NSURLVolumeAvailableCapacityForImportantUsageKey"])
-    # AvailableCapacityは今すぐ使える本当の空き。差分がmacOSが必要に応じて消すパージ可能領域(キャッシュ等)
-    free = min(int(values["NSURLVolumeAvailableCapacityKey"]), available)
-    used = total - available
     return {
-        "total": total,
-        "used": used,
-        "available": available,
-        "free": free,
-        "purgeable": available - free,
-        "percent": used / total * 100,
+        "total": int(values["NSURLVolumeTotalCapacityKey"]),
+        "available": int(values["NSURLVolumeAvailableCapacityForImportantUsageKey"]),
     }
 
 def get_memory_usage():
@@ -239,7 +229,8 @@ def format_free_lines(available_bytes):
     残り容量はほとんど変わらず表示幅も揺れにくいので、使用率やネットワークと違って0埋めはしない"""
     if available_bytes is None:
         return [[("Free", None)], [("--GB", NSColor.secondaryLabelColor())]]
-    return [[("Free", None)], [(f"{available_bytes / 1000 ** 3:.0f}GB", None)]]
+    # 残りが少ないときは、メニュー内のStorage欄と同じしきい値で色を付けて警告する
+    return [[("Free", None)], [(f"{available_bytes / 1000 ** 3:.0f}GB", menu_views.free_color(available_bytes))]]
 
 def build_status_image(segments, height, mode):
     """segments: [(label, value, color[, suffix])] から縦書きラベル付きの画像を作る。
@@ -372,8 +363,7 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         self.gpu_history = deque(maxlen=menu_views.HISTORY)
         self.dl_history = deque(maxlen=menu_views.HISTORY)
         self.ul_history = deque(maxlen=menu_views.HISTORY)
-        self.disk_read_history = deque(maxlen=menu_views.HISTORY)
-        self.disk_write_history = deque(maxlen=menu_views.HISTORY)
+        self.disk_busy_history = deque(maxlen=menu_views.HISTORY)
 
         # python本体(org.python.python)のドメインを汚さないよう、専用のsuiteに保存する
         self.defaults = NSUserDefaults.alloc().initWithSuiteName_(DEFAULTS_SUITE)
@@ -465,7 +455,7 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
             "gpu": menu_views.gpu_section(self.latest["gpu"], self.gpu_history, self.gpu_processes,
                                           self.gpu_visible, self._show_more_gpu, self._collapse_gpu),
             "storage": menu_views.storage_section(
-                self.latest["storage"], self.latest["disk_io"], self.disk_read_history, self.disk_write_history,
+                self.latest["storage"], self.latest["disk_io"], self.disk_busy_history,
                 self.disk_processes, self.disk_visible, self._show_more_disk, self._collapse_disk,
             ),
             "network": menu_views.network_section(
@@ -476,8 +466,8 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
             menu_views.set_section(self.sections[key], height, drawer, *on_click)
 
     @objc.python_method
-    def _show_more_memory(self):
-        self.memory_visible += menu_views.PROCESS_PAGE
+    def _show_more_memory(self, visible):
+        self.memory_visible = visible
         # 次のタイマーを待たず、その場で高さを変えて描き直す
         self._refresh_sections()
 
@@ -487,8 +477,8 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         self._refresh_sections()
 
     @objc.python_method
-    def _show_more_cpu(self):
-        self.cpu_visible += menu_views.PROCESS_PAGE
+    def _show_more_cpu(self, visible):
+        self.cpu_visible = visible
         self._refresh_sections()
 
     @objc.python_method
@@ -497,8 +487,8 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         self._refresh_sections()
 
     @objc.python_method
-    def _show_more_disk(self):
-        self.disk_visible += menu_views.PROCESS_PAGE
+    def _show_more_disk(self, visible):
+        self.disk_visible = visible
         self._refresh_sections()
 
     @objc.python_method
@@ -507,8 +497,8 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         self._refresh_sections()
 
     @objc.python_method
-    def _show_more_gpu(self):
-        self.gpu_visible += menu_views.PROCESS_PAGE
+    def _show_more_gpu(self, visible):
+        self.gpu_visible = visible
         self._refresh_sections()
 
     @objc.python_method
@@ -573,8 +563,7 @@ class MonitorController(NSObject, protocols=[objc.protocolNamed("NSMenuDelegate"
         storage = collect("storage", get_storage_usage)
         disk_io = collect("disk_io", self.disk_io.sample)
         if disk_io is not None:
-            self.disk_read_history.append(disk_io["read"])
-            self.disk_write_history.append(disk_io["write"])
+            self.disk_busy_history.append(disk_io["busy"])
         net = collect("network", self.network.sample)
         if net is not None:
             self.dl_history.append(net["dl"])

@@ -87,6 +87,18 @@ def value_color(percent):
     # 通常時は標準色(ライト/ダーク自動追従)のままにする
     return None
 
+# ストレージの残り容量の警告のしきい値(バイト)。判断に使うのは割合ではなく残りのGB数なので絶対量で決める
+FREE_WARNING_BYTES = 50 * 1000 ** 3   # 大きなアップデートや書き出しが厳しくなり始める
+FREE_CRITICAL_BYTES = 20 * 1000 ** 3  # macOSの動作にも影響が出やすい
+
+def free_color(available_bytes):
+    """残り容量の文字色。メニュー内のStorage欄とメニューバーのSSDで共用する"""
+    if available_bytes < FREE_CRITICAL_BYTES:
+        return NSColor.systemRedColor()
+    if available_bytes < FREE_WARNING_BYTES:
+        return NSColor.systemOrangeColor()
+    return None
+
 def nice_ceil(value):
     """グラフの上限を1/2/5×10^nの切りの良い値に切り上げる(network_monitor.pyと同じ)。"""
     value = max(value, MIN_SCALE_MBPS)
@@ -239,6 +251,18 @@ def heat_color(percent):
         return NSColor.systemGreenColor()
     return NSColor.systemBlueColor()
 
+PERCENT_CHART_HEIGHT = CHART_HEIGHT + SMALL_ROW_HEIGHT + 1  # draw_percent_chart 1つ分の高さ
+
+def draw_percent_chart(x, y, width, history, color):
+    """縦軸0〜100%固定の推移グラフと、その下の「2分前 / 現在」の行。GPUの使用率・ディスクのビジー率で共用する。
+    上端に100%の目盛り線を薄く引き、ほかのグラフと同じく左上に目盛りの値を添える"""
+    fill_rect(x, y, width, 0.5, NSColor.tertiaryLabelColor())
+    draw_history_chart(x, y, width, CHART_HEIGHT, list(history), 100, color)
+    draw_text("100%", x + 3, y + 1, mono_small_font(), NSColor.tertiaryLabelColor())
+    footer_y = y + CHART_HEIGHT + 1
+    draw_text("2分前", x, footer_y, small_font(), NSColor.tertiaryLabelColor())
+    draw_text_right("現在", x + width, footer_y, small_font(), NSColor.tertiaryLabelColor())
+
 MIRROR_HALF_HEIGHT = 24  # 上下対称グラフの片側の高さ(pt)
 # draw_mirror_chart 1つ分の高さ(上の見出し + グラフ上下 + 下の見出し + 余白)
 MIRROR_CHART_HEIGHT = SMALL_ROW_HEIGHT * 2 + MIRROR_HALF_HEIGHT * 2 + 6
@@ -388,31 +412,44 @@ def cpu_section(percent, core_rows, processes=None, visible=COLLAPSED_PROCESSES,
 
 class PagerRow:
     """一覧の末尾に置く「さらに表示」「折りたたむ」の行。
-    shown件を表示中で、さらにremaining件あるとき、左側で次のpage件を、右端で初期件数(collapsed)に戻す"""
+    shown件を表示中で、さらにremaining件あるとき、左側で次の件数を表示し、
+    展開中(表示件数visible_countが初期件数collapsedより多い)なら右端で初期件数に戻す。
+    ほかに無いときは左側にempty_noteを出す"""
 
-    def __init__(self, y, shown, remaining, collapsed, rest_note):
+    def __init__(self, y, shown, remaining, collapsed, rest_note, visible_count,
+                 empty_note="ほかのアプリはありません"):
         self.y = y
         self.remaining = remaining
-        self.can_collapse = shown > collapsed
+        # 「さらに表示」で増やすのは、押した時点で実際に表示できる件数(最大PROCESS_PAGE件)だけにする。
+        # 確保する高さは表示件数で固定されるので、ボタンの「さらに◯件」と増える行数を一致させる
+        self.next_visible = shown + min(remaining, PROCESS_PAGE)
+        # 展開中かどうかは表示件数で決める(展開後にアプリが減っても折りたためるように)
+        self.can_collapse = visible_count > collapsed
         self.rest_note = rest_note  # 「残り 276グループ · 4.8 GB」のような補足
+        self.empty_note = empty_note
         self.visible = bool(remaining) or self.can_collapse
         self.collapse_x = MENU_WIDTH - PAD_X - COLLAPSE_ZONE_WIDTH
 
     def zone(self, point):
-        """指している側("more" / "collapse" / None)"""
+        """指している側("more" / "collapse" / None)。「折りたたむ」は右端だけで反応する"""
         if point is None or not self.visible or not self.y <= point.y < self.y + ROW_HEIGHT:
             return None
-        if self.can_collapse and (point.x >= self.collapse_x or not self.remaining):
+        if self.can_collapse and point.x >= self.collapse_x:
             return "collapse"
         return "more" if self.remaining else None
 
     def click(self, point, on_more, on_collapse):
-        handler = {"more": on_more, "collapse": on_collapse}.get(self.zone(point))
-        if handler is not None:
-            handler()
+        """on_more(次の表示件数) / on_collapse() を呼ぶ"""
+        zone = self.zone(point)
+        if zone == "more" and on_more is not None:
+            on_more(self.next_visible)
+        elif zone == "collapse" and on_collapse is not None:
+            on_collapse()
 
-    def draw(self, width, hover):
-        if not self.visible:
+    def draw(self, width, hover, show_empty=False, note=True):
+        """show_empty=Trueなら、折りたたまれていてもほかに無いことを示す文言を出す。
+        note=Falseなら左側の文言を出さない(一覧自体が空で、その旨を別に出しているとき)"""
+        if not (self.visible or show_empty):
             return
         font, secondary = body_font(), NSColor.secondaryLabelColor()
         # 押せることが分かるよう、ホバー中の側だけ背景を薄く敷く
@@ -421,12 +458,14 @@ class PagerRow:
             right = self.collapse_x if self.can_collapse else width - PAD_X + 6
             fill_rect(PAD_X - 6, self.y, right - (PAD_X - 6), ROW_HEIGHT, NSColor.quaternaryLabelColor(), radius=4)
         elif zone == "collapse":
-            left = self.collapse_x if self.remaining else PAD_X - 6
-            fill_rect(left, self.y, width - PAD_X + 6 - left, ROW_HEIGHT, NSColor.quaternaryLabelColor(), radius=4)
+            fill_rect(self.collapse_x, self.y, width - PAD_X + 6 - self.collapse_x, ROW_HEIGHT,
+                      NSColor.quaternaryLabelColor(), radius=4)
         if self.remaining:
             end = draw_symbol("chevron.down", PAD_X, self.y, ROW_HEIGHT, secondary)
             end = draw_text(f"さらに{min(self.remaining, PROCESS_PAGE)}件表示", end + 4, self.y, font, secondary)
             draw_text(f"  {self.rest_note}", end, self.y + 2, small_font(), NSColor.tertiaryLabelColor())
+        elif note:
+            draw_text(self.empty_note, PAD_X, self.y, font, NSColor.tertiaryLabelColor())
         if self.can_collapse:
             text = attributed("折りたたむ", font, secondary)
             text_x = width - PAD_X - text.size().width
@@ -437,7 +476,9 @@ class UsageTable:
     """「Process (grouped)」の見出し、アプリごとの使用率(名前・バー・%)、末尾の「さらに表示」の行からなる表。
     processes: [(アプリ名, 値)](None=集計中)。値は既定では使用率(全体=100%)で、
     上位同士の比較ではなく全体に対する割合が分かるようバーも100%基準で描く。
-    行数は数秒ごとに増減するので、初期件数分の高さは常に確保してメニューの揺れを抑える"""
+    行数は数秒ごとに増減するので、表示件数(初期件数または「さらに表示」で広げた件数)分と末尾の行の高さは
+    常に確保し、アプリが足りない行は空けてメニューの揺れを抑える。
+    「さらに表示」を出す必要がないときは、末尾の行に「ほかのアプリはありません」と出す"""
 
     def __init__(self, y, processes, visible, collapsed, value_header, color, empty_text,
                  format_value="{:.1f}%".format, bar_max=100):
@@ -449,10 +490,11 @@ class UsageTable:
         self.value_header, self.color, self.empty_text = value_header, color, empty_text
         self.format_value = format_value
         self.bar_max = bar_max if bar_max is not None else max((v for _, v in processes or []), default=0)
-        self.pager = PagerRow(y + SMALL_ROW_HEIGHT + ROW_HEIGHT * len(self.shown), len(self.shown),
+        rows = max(visible, collapsed)
+        self.pager = PagerRow(y + SMALL_ROW_HEIGHT + ROW_HEIGHT * rows, len(self.shown),
                               len(remaining), collapsed,
-                              f"残り {len(remaining)}アプリ · {format_value(sum(v for _, v in remaining))}")
-        self.height = SMALL_ROW_HEIGHT + ROW_HEIGHT * (max(len(self.shown), collapsed) + self.pager.visible)
+                              f"残り {len(remaining)}アプリ · {format_value(sum(v for _, v in remaining))}", visible)
+        self.height = SMALL_ROW_HEIGHT + ROW_HEIGHT * (rows + 1)
 
     def click(self, point, on_more, on_collapse):
         self.pager.click(point, on_more, on_collapse)
@@ -471,24 +513,23 @@ class UsageTable:
         draw_text_right(self.value_header, value_right, self.y, small_font(), secondary)
 
         row_y = self.y + SMALL_ROW_HEIGHT
-        if self.processes is None:
-            draw_text("集計中…", PAD_X, row_y, font, secondary)
-            return
         if not self.processes:
-            draw_text(self.empty_text, PAD_X, row_y, font, secondary)
+            draw_text("集計中…" if self.processes is None else self.empty_text, PAD_X, row_y, font, secondary)
+            # 展開中なら「折りたたむ」だけは出す
+            self.pager.draw(width, hover, note=False)
             return
         for name, value in self.shown:
             draw_text_fit(name, PAD_X, row_y, name_w, font)
             draw_bar(bar_x, row_y + 5, bar_len, min(value / self.bar_max, 1) if self.bar_max else 0, self.color, h=6)
             draw_text_right(self.format_value(value), value_right, row_y, mono)
             row_y += ROW_HEIGHT
-        self.pager.draw(width, hover)
+        self.pager.draw(width, hover, show_empty=True)
 
 def gpu_section(gpu, history, processes=None, visible=TOP_GPU_PROCESSES, on_more=None, on_collapse=None):
     """gpu: menubar_monitor.get_gpu_usage()の戻り値(None=取得失敗)、
     processes: GpuProcessSampler.sample()の結果(None=集計中)。
     ランキングは上位visible件を出し、末尾の行で「さらに表示」「折りたたむ」を選べる(メモリ欄と同じ)"""
-    table = UsageTable(PAD_Y + TITLE_HEIGHT + CHART_HEIGHT + SMALL_ROW_HEIGHT + 8, processes, visible,
+    table = UsageTable(PAD_Y + TITLE_HEIGHT + PERCENT_CHART_HEIGHT + 7, processes, visible,
                        TOP_GPU_PROCESSES, "GPU", NSColor.systemPurpleColor(), "GPUを使っているアプリはありません")
     height = table.y + table.height + PAD_Y
 
@@ -503,15 +544,7 @@ def gpu_section(gpu, history, processes=None, visible=TOP_GPU_PROCESSES, on_more
             memory = [("Memory Usage ", NSColor.secondaryLabelColor()), (f"{gpu['memory'] / GB:.1f} GB  ", None)]
             draw_title(width, PAD_Y, "GPU", (memory if gpu["memory"] is not None else [])
                        + percent_parts(gpu["percent"], "{:.0f}%"))
-        chart_y = PAD_Y + TITLE_HEIGHT
-        # 縦軸は0〜100%固定。上端に100%の目盛り線を薄く引き、ほかのグラフと同じく左上に目盛りの値を添える
-        fill_rect(PAD_X, chart_y, width - PAD_X * 2, 0.5, NSColor.tertiaryLabelColor())
-        draw_history_chart(PAD_X, chart_y, width - PAD_X * 2, CHART_HEIGHT, list(history), 100,
-                           NSColor.systemPurpleColor())
-        draw_text("100%", PAD_X + 3, chart_y + 1, mono_small_font(), NSColor.tertiaryLabelColor())
-        footer_y = chart_y + CHART_HEIGHT + 1
-        draw_text("2分前", PAD_X, footer_y, small_font(), NSColor.tertiaryLabelColor())
-        draw_text_right("現在", width - PAD_X, footer_y, small_font(), NSColor.tertiaryLabelColor())
+        draw_percent_chart(PAD_X, PAD_Y + TITLE_HEIGHT, width - PAD_X * 2, history, NSColor.systemPurpleColor())
 
         # GPUを使っているアプリの上位。メモリ欄のランキングと同じ並び(名前・バー・値)にする
         table.draw(width, hover)
@@ -532,10 +565,13 @@ def memory_section(mem, groups, visible=COLLAPSED_PROCESSES, on_more=None, on_co
     shown, remaining = measured[:visible], measured[visible:]
     show_unmeasured = not remaining and unmeasured > 0
     table_y = PAD_Y + TITLE_HEIGHT + BAR_HEIGHT + 6 + SMALL_ROW_HEIGHT * 2 + 8
-    pager = PagerRow(table_y + SMALL_ROW_HEIGHT + ROW_HEIGHT * (len(shown) + show_unmeasured),
+    # 表示件数分の行を常に確保し(CPU・GPUの表と同じ)、末尾の行はその下の決まった位置に置く
+    rows = max(visible, len(shown) + show_unmeasured)
+    pager = PagerRow(table_y + SMALL_ROW_HEIGHT + ROW_HEIGHT * rows,
                      len(shown), len(remaining), COLLAPSED_PROCESSES,
-                     f"残り {len(remaining)}グループ · {format_footprint(sum(g[3] for g in remaining))}")
-    process_rows = (len(shown) + show_unmeasured + pager.visible) if groups else 1
+                     f"残り {len(remaining)}グループ · {format_footprint(sum(g[3] for g in remaining))}", visible,
+                     empty_note="ほかのグループはありません")
+    process_rows = (rows + pager.visible) if groups else 1
     height = table_y + SMALL_ROW_HEIGHT + ROW_HEIGHT * process_rows + PAD_Y
 
     def on_click(point):
@@ -600,26 +636,25 @@ def memory_section(mem, groups, visible=COLLAPSED_PROCESSES, on_more=None, on_co
 
     return height, draw, on_click
 
-def format_rate(bytes_per_sec):
-    """ディスクの読み書き速度(バイト/秒)を桁に応じてKB/s・MB/sで表す"""
-    if bytes_per_sec >= 1_000_000:
-        return f"{bytes_per_sec / 1_000_000:.1f} MB/s"
-    return f"{bytes_per_sec / 1_000:.0f} KB/s"
-
-def storage_section(storage, disk_io=None, read_history=(), write_history=(),
+def storage_section(storage, disk_io=None, busy_history=(),
                     processes=None, visible=TOP_DISK_PROCESSES, on_more=None, on_collapse=None):
     """storage: get_storage_usage()の戻り値、disk_io: DiskIOSampler.sample()の戻り値(None=取得失敗)、
-    processes: ディスクのGroupRateSamplerの結果(None=集計中)。
-    容量のバー・空きの内訳の下に、読み書き速度のグラフとアプリごとの読み書き速度の表を置く"""
-    charts_y = PAD_Y + TITLE_HEIGHT + BAR_HEIGHT + 4 + SMALL_ROW_HEIGHT + 4
-    charts_height = MIRROR_CHART_HEIGHT if disk_io else 0
-    # バーはディスク全体の読み書き速度に占める割合にする(1位基準だと数KB/sでも満杯に見えてしまう)。
-    # 計測のタイミングがずれてアプリの値が全体を上回ることがあるので、1位の値も下限にする
-    disk_total = (disk_io["read"] + disk_io["write"]) * 1_000_000 if disk_io else 0
-    top = processes[0][1] if processes else 0
-    table = UsageTable(charts_y + charts_height + 4, processes, visible, TOP_DISK_PROCESSES, "Read+Write",
-                       NSColor.secondaryLabelColor(), "ディスクを読み書きしているアプリはありません",
-                       format_value=format_rate, bar_max=max(disk_total, top))
+    busy_history: ビジー率の履歴、processes: ディスクのGroupRateSamplerの結果(None=集計中)。
+    見出しの下に、ビジー率の推移(右上に今の読み書き速度)とアプリごとの読み書き速度の表を置く。
+    読み書き速度の推移は普段ほぼ平らで見る機会が少ないので、混み具合が分かるビジー率の推移を出す。
+    残り容量は割合より絶対量で知りたいことが多いので、使用率のバーは置かず、見出しのFreeの値を色で警告する"""
+    charts_y = PAD_Y + TITLE_HEIGHT
+    charts_height = PERCENT_CHART_HEIGHT if disk_io else 0
+    # アプリごとのビジー率(ディスクを占有していた時間)はsudoなしでは取れないので、
+    # 全体のビジー率を各アプリの読み書き量の割合で配分した推定値を出す。合計は見出しのBusyと一致する。
+    # 小さなファイルを大量に扱う処理は量の割りに時間がかかるため、実際の占有時間とはずれることがある
+    if not disk_io:
+        processes = None  # 全体のビジー率が無いと推定できない
+    elif processes:
+        total_rate = sum(rate for _, rate in processes)
+        processes = [(name, disk_io["busy"] * rate / total_rate) for name, rate in processes]
+    table = UsageTable(charts_y + charts_height + 4, processes, visible, TOP_DISK_PROCESSES, "Busy (est.)",
+                       NSColor.systemTealColor(), "ディスクを読み書きしているアプリはありません")
     height = table.y + table.height + PAD_Y
 
     def on_click(point):
@@ -629,29 +664,22 @@ def storage_section(storage, disk_io=None, read_history=(), write_history=(),
         if storage is None:
             draw_title(width, PAD_Y, "Storage", percent_parts(None))
         else:
-            # 見出しの右: ディスクのビジー率(メニューバーのSSDの値と同じ)と容量の使用率
-            busy = [("Busy ", NSColor.secondaryLabelColor()), (f"{disk_io['busy']:.0f}%   ", None)] if disk_io else []
-            draw_title(width, PAD_Y, "Storage", busy + [
-                (f"{storage['used'] / STORAGE_GB:.0f} / {storage['total'] / STORAGE_GB:.0f} GB  ", None),
-                *percent_parts(storage["percent"]),
+            # 見出しの右: 残り容量(パージ可能領域を含む)/全体と、ビジー率。どちらもメニューバーのSSDの表示と同じ値
+            secondary = NSColor.secondaryLabelColor()
+            busy = [("   Busy ", secondary), (f"{disk_io['busy']:.0f}%", None)] if disk_io else []
+            draw_title(width, PAD_Y, "Storage", [
+                ("Free ", secondary),
+                (f"{storage['available'] / STORAGE_GB:.0f} GB", free_color(storage["available"])),
+                (f" / {storage['total'] / STORAGE_GB:.0f} GB", None),
+                *busy,
             ])
-            bar_y = PAD_Y + TITLE_HEIGHT
-            draw_bar(PAD_X, bar_y, width - PAD_X * 2, storage["percent"] / 100, value_color(storage["percent"]))
-            # 空きは「今すぐ使える空き」と「macOSが必要に応じて消すパージ可能領域」に分けて出す
-            draw_text(f"空き {storage['free'] / STORAGE_GB:.1f} GB ＋ パージ可能 {storage['purgeable'] / STORAGE_GB:.1f} GB",
-                      PAD_X, bar_y + BAR_HEIGHT + 4, small_font(), NSColor.secondaryLabelColor())
 
-        # 読み書き速度。色はActivity Monitorのディスクのグラフと同じく読み込み=青、書き込み=赤。
-        # ネットワーク欄(上り/下り)とそろえて、↑書き込みを上、↓読み込みを下に描く
+        # ビジー率の推移(GPUの使用率と同じく0〜100%固定)。色はGPU(紫)・ネットワーク(赤/青)と区別できる青緑
         if disk_io:
-            peaks, totals = disk_io["peaks"], disk_io["totals"]
-            draw_mirror_chart(
-                PAD_X, charts_y, width - PAD_X * 2, "MB/s",
-                ("↑ Write", disk_io["write"], peaks["write"], format_bytes(totals["write"]), write_history,
-                 NSColor.systemRedColor(), ""),
-                ("↓ Read", disk_io["read"], peaks["read"], format_bytes(totals["read"]), read_history,
-                 NSColor.systemBlueColor(), ""),
-            )
+            draw_percent_chart(PAD_X, charts_y, width - PAD_X * 2, busy_history, NSColor.systemTealColor())
+            # 今の読み書き速度は、左上の目盛り(100%)の反対側に添える(ネットワークと同じく↑書き込み・↓読み込みの順)
+            draw_text_right(f"↑ {disk_io['write']:.1f} MB/s   ↓ {disk_io['read']:.1f} MB/s", width - PAD_X - 3,
+                            charts_y + 1, mono_small_font(), NSColor.secondaryLabelColor())
 
         # ディスクを読み書きしているアプリの上位
         table.draw(width, hover)
