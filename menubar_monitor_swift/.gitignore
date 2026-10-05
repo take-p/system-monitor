@@ -1,3 +1,0 @@
-# project.yml から xcodegen で生成するので管理しない
-*.xcodeproj/
-build/
